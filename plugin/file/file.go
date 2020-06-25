@@ -8,6 +8,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/plugin/transfer"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
@@ -20,6 +21,7 @@ type (
 	File struct {
 		Next plugin.Handler
 		Zones
+		transfer *transfer.Transfer
 	}
 
 	// Zones maps zone names to a *Zone.

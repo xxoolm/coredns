@@ -9,6 +9,7 @@ import (
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/parse"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
+	"github.com/coredns/coredns/plugin/transfer"
 
 	"github.com/caddyserver/caddy"
 )
@@ -21,26 +22,52 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("file", err)
 	}
 
-	// Add startup functions to notify the master(s).
-	for _, n := range zones.Names {
-		z := zones.Z[n]
-		c.OnStartup(func() error {
-			z.StartupOnce.Do(func() {
-				if len(z.TransferTo) > 0 {
-					z.Notify()
-				}
-				z.Reload()
-			})
+	f := File{Zones: zones}
+	// get the transfer plugin, so we can send notifies and send notifies on startup as well.
+	c.OnStartup(func() error {
+		for _, p := range dnsserver.GetConfig(c).Handlers() {
+			if t, ok := p.(*transfer.Transfer); ok {
+				f.transfer = t
+				break
+			}
+		}
+		if f.transfer == nil {
 			return nil
-		})
-	}
+		}
+		for _, n := range zones.Names {
+			f.transfer.Notify(n)
+		}
+		return nil
+	})
+
+	c.OnRestartFailed(func() error {
+		for _, p := range dnsserver.GetConfig(c).Handlers() {
+			if t, ok := p.(*transfer.Transfer); ok {
+				f.transfer = t
+				break
+			}
+		}
+		if f.transfer == nil {
+			return nil
+		}
+		for _, n := range zones.Names {
+			f.transfer.Notify(n)
+		}
+		return nil
+	})
+
 	for _, n := range zones.Names {
 		z := zones.Z[n]
 		c.OnShutdown(z.OnShutdown)
+		c.OnStartup(func() error {
+			z.StartupOnce.Do(func() { z.Reload(f.transfer) })
+			return nil
+		})
 	}
 
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return File{Next: next, Zones: zones}
+		f.Next = next
+		return f
 	})
 
 	return nil

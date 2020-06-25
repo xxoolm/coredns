@@ -45,7 +45,6 @@ func setup(c *caddy.Controller) error {
 }
 
 func parse(c *caddy.Controller) (*Transfer, error) {
-
 	t := &Transfer{}
 	for c.Next() {
 		x := &xfr{}
