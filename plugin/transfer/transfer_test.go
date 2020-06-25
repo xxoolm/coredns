@@ -20,10 +20,10 @@ type transfererPlugin struct {
 }
 
 // Name implements plugin.Handler
-func (transfererPlugin) Name() string { return "transfererplugin" }
+func (*transfererPlugin) Name() string { return "transfererplugin" }
 
 // ServeDNS implements plugin.Handler
-func (p transfererPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (p *transfererPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	if r.Question[0].Name != p.Zone {
 		return p.Next.ServeDNS(ctx, w, r)
 	}
@@ -32,7 +32,7 @@ func (p transfererPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r 
 
 // Transfer implements transfer.Transferer - it returns a static AXFR response, or
 // if serial is current, an abbreviated IXFR response
-func (p transfererPlugin) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
+func (p *transfererPlugin) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
 	if zone != p.Zone {
 		return nil, ErrNotAuthoritative
 	}
@@ -52,10 +52,10 @@ func (p transfererPlugin) Transfer(zone string, serial uint32) (<-chan []dns.RR,
 type terminatingPlugin struct{}
 
 // Name implements plugin.Handler
-func (terminatingPlugin) Name() string { return "testplugin" }
+func (*terminatingPlugin) Name() string { return "testplugin" }
 
 // ServeDNS implements plugin.Handler that returns NXDOMAIN for all requests
-func (terminatingPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (*terminatingPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeNameError)
 	w.WriteMsg(m)
@@ -65,11 +65,11 @@ func (terminatingPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 func newTestTransfer() Transfer {
 	nextPlugin1 := transfererPlugin{Zone: "example.com.", Serial: 12345}
 	nextPlugin2 := transfererPlugin{Zone: "example.org.", Serial: 12345}
-	nextPlugin2.Next = terminatingPlugin{}
-	nextPlugin1.Next = nextPlugin2
+	nextPlugin2.Next = &terminatingPlugin{}
+	nextPlugin1.Next = &nextPlugin2
 
 	transfer := Transfer{
-		Transferers: []Transferer{nextPlugin1, nextPlugin2},
+		Transferers: []Transferer{&nextPlugin1, &nextPlugin2},
 		xfrs: []*xfr{
 			{
 				Zones: []string{"example.org."},
@@ -80,7 +80,7 @@ func newTestTransfer() Transfer {
 				to:    []string{"*"},
 			},
 		},
-		Next: nextPlugin1,
+		Next: &nextPlugin1,
 	}
 	return transfer
 }
@@ -171,7 +171,7 @@ func TestTransferIXFRFallback(t *testing.T) {
 
 	transfer := newTestTransfer()
 
-	testPlugin := transfer.Transferers[0].(transfererPlugin)
+	testPlugin := transfer.Transferers[0].(*transfererPlugin)
 
 	ctx := context.TODO()
 	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
@@ -195,7 +195,7 @@ func TestTransferIXFRCurrent(t *testing.T) {
 
 	transfer := newTestTransfer()
 
-	testPlugin := transfer.Transferers[0].(transfererPlugin)
+	testPlugin := transfer.Transferers[0].(*transfererPlugin)
 
 	ctx := context.TODO()
 	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
@@ -263,14 +263,14 @@ func TestTransferNotAllowed(t *testing.T) {
 	nextPlugin := transfererPlugin{Zone: "example.org.", Serial: 12345}
 
 	transfer := Transfer{
-		Transferers: []Transferer{nextPlugin},
+		Transferers: []Transferer{&nextPlugin},
 		xfrs: []*xfr{
 			{
 				Zones: []string{"example.org."},
 				to:    []string{"1.2.3.4"},
 			},
 		},
-		Next: nextPlugin,
+		Next: &nextPlugin,
 	}
 
 	ctx := context.TODO()
@@ -287,5 +287,4 @@ func TestTransferNotAllowed(t *testing.T) {
 	if rcode != dns.RcodeRefused {
 		t.Errorf("Expected REFUSED response code, got %s", dns.RcodeToString[rcode])
 	}
-
 }
