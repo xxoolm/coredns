@@ -79,11 +79,6 @@ func (f File) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 		return dns.RcodeServerFailure, nil
 	}
 
-	if state.QType() == dns.TypeAXFR || state.QType() == dns.TypeIXFR {
-		xfr := Xfr{z}
-		return xfr.ServeDNS(ctx, w, r)
-	}
-
 	answer, ns, extra, result := z.Lookup(ctx, state, qname)
 
 	m := new(dns.Msg)

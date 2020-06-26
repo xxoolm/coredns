@@ -29,7 +29,7 @@ secondary [zones...] {
 
 * `transfer from` specifies from which address to fetch the zone. It can be specified multiple times;
     if one does not work, another will be tried. Transfering this zone outwards again can be done by
-    enableing the *transfer plugin*.
+    enableing the *transfer* plugin.
 
 When a zone is due to be refreshed (Refresh timer fires) a random jitter of 5 seconds is
 applied, before fetching. In the case of retry this will be 2 seconds. If there are any errors

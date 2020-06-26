@@ -13,6 +13,9 @@ with AXFR fallback if the zone has changed.
 
 When a plugin wants to notify it's secondaries it will call back into the *transfer* plugin.
 
+The following plugins implement zone transfers using this plugin: *file*, *auto*, *secondary*, and
+*kubernetes*.
+
 ## Syntax
 
 ~~~
@@ -30,3 +33,5 @@ transfer [ZONE...] {
     addresses. `to` may be specified multiple times.
 
 ## Examples
+
+See the specific plugins using this plugin for examples on it's usage.

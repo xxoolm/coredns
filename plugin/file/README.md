@@ -92,4 +92,4 @@ example.org {
 ## Also See
 
 See the *loadbalance* plugin if you need simple record shuffling. And the *transfer* plugin for zone
-transfers.
+transfers. Lastly the *root* plugin can help you specificy the location of the zone files.

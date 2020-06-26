@@ -53,7 +53,6 @@ func (a Auto) Walk() error {
 
 		zo.ReloadInterval = a.loader.ReloadInterval
 		zo.Upstream = a.loader.upstream
-		zo.TransferTo = a.loader.transferTo
 
 		a.Zones.Add(zo, origin, a.transfer)
 

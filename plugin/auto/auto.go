@@ -32,8 +32,6 @@ type (
 		template  string
 		re        *regexp.Regexp
 
-		// In the future this should be something like ZoneMeta that contains all this stuff.
-		transferTo     []string
 		ReloadInterval time.Duration
 		upstream       *upstream.Upstream // Upstream for looking up names during the resolution process.
 	}
@@ -59,11 +57,6 @@ func (a Auto) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 
 	if !ok || z == nil {
 		return dns.RcodeServerFailure, nil
-	}
-
-	if state.QType() == dns.TypeAXFR || state.QType() == dns.TypeIXFR {
-		xfr := file.Xfr{Zone: z}
-		return xfr.ServeDNS(ctx, w, r)
 	}
 
 	answer, ns, extra, result := z.Lookup(ctx, state, qname)

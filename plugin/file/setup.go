@@ -7,7 +7,6 @@ import (
 
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
-	"github.com/coredns/coredns/plugin/pkg/parse"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 	"github.com/coredns/coredns/plugin/transfer"
 
@@ -111,17 +110,8 @@ func fileParse(c *caddy.Controller) (Zones, error) {
 			names = append(names, origins[i])
 		}
 
-		t := []string{}
-		var e error
-
 		for c.NextBlock() {
 			switch c.Val() {
-			case "transfer":
-				t, _, e = parse.Transfer(c, false)
-				if e != nil {
-					return Zones{}, e
-				}
-
 			case "reload":
 				d, err := time.ParseDuration(c.RemainingArgs()[0])
 				if err != nil {
@@ -129,18 +119,8 @@ func fileParse(c *caddy.Controller) (Zones, error) {
 				}
 				reload = d
 
-			case "upstream":
-				// remove soon
-				c.RemainingArgs()
-
 			default:
 				return Zones{}, c.Errf("unknown property '%s'", c.Val())
-			}
-
-			for _, origin := range origins {
-				if t != nil {
-					z[origin].TransferTo = append(z[origin].TransferTo, t...)
-				}
 			}
 		}
 	}
