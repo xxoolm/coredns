@@ -9,7 +9,7 @@ import (
 	"github.com/caddyserver/caddy"
 )
 
-// Transfer parses transfer statements: 'transfer from [address...]'.
+// TransferIn parses transfer statements: 'transfer from [address...]'.
 func TransferIn(c *caddy.Controller) (froms []string, err error) {
 	if !c.NextArg() {
 		return nil, c.ArgErr()
