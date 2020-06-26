@@ -36,7 +36,8 @@ type Transferer interface {
 	//
 	// If serial is 0, handle as an AXFR request. Transfer should send all records
 	// in the zone to the channel. The SOA should be written to the channel first, followed
-	// by all other records, including all NS + glue records.
+	// by all other records, including all NS + glue records. The implemenation is also responsible
+	// for sending the last SOA record (to signal end of the transfer).
 	//
 	// If serial is not 0, handle as an IXFR request. If the serial is equal to or greater (newer) than
 	// the current serial for the zone, send a single SOA record to the channel.
@@ -46,9 +47,21 @@ type Transferer interface {
 }
 
 var (
-	// ErrNotAuthoritative is returned by Transfer() when the plugin is not authoritative for the zone
+	// ErrNotAuthoritative is returned by Transfer() when the plugin is not authoritative for the zone.
 	ErrNotAuthoritative = errors.New("not authoritative for zone")
 )
+
+// From file transfer code:
+/*
+	// For IXFR we take the SOA in the IXFR message (if there), compare it what we have and then decide to do an
+	// AXFR or just reply with one SOA message back.
+	if state.QType() == dns.TypeIXFR {
+		code, _ := x.ServeIxfr(ctx, w, r)
+		if plugin.ClientWrite(code) {
+			return code, nil
+		}
+	}
+*/
 
 // ServeDNS implements the plugin.Handler interface.
 func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
@@ -76,7 +89,7 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		return dns.RcodeRefused, nil
 	}
 
-	// Get serial from request if this is an IXFR
+	// Get serial from request if this is an IXFR.
 	var serial uint32
 	if state.QType() == dns.TypeIXFR {
 		soa, ok := r.Ns[0].(*dns.SOA)
@@ -87,10 +100,10 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	}
 
 	// Get a receiving channel from the first Transferer plugin that returns one
-	var fromPlugin <-chan []dns.RR
+	var pchan <-chan []dns.RR
+	var err error
 	for _, p := range t.Transferers {
-		var err error
-		fromPlugin, err = p.Transfer(state.QName(), serial)
+		pchan, err = p.Transfer(state.QName(), serial)
 		if err == ErrNotAuthoritative {
 			// plugin was not authoritative for the zone, try next plugin
 			continue
@@ -101,7 +114,7 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		break
 	}
 
-	if fromPlugin == nil {
+	if pchan == nil {
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
 
@@ -119,14 +132,12 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	rrs := []dns.RR{}
 	l := 0
 
-receive:
-	for records := range fromPlugin {
+	for records := range pchan {
 		for _, record := range records {
 			if soa == nil {
-				if soa = record.(*dns.SOA); soa == nil {
-					break receive
+				if soa = record.(*dns.SOA); soa != nil {
+					serial = soa.Serial
 				}
-				serial = soa.Serial
 			}
 			rrs = append(rrs, record)
 			if len(rrs) > 500 {
@@ -141,11 +152,6 @@ receive:
 		ch <- &dns.Envelope{RR: rrs}
 		l += len(rrs)
 		rrs = []dns.RR{}
-	}
-
-	if soa != nil {
-		ch <- &dns.Envelope{RR: []dns.RR{soa}} // closing SOA.
-		l++
 	}
 
 	close(ch) // Even though we close the channel here, we still have

@@ -10,7 +10,6 @@ import (
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/metrics"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
-	"github.com/coredns/coredns/plugin/pkg/parse"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 	"github.com/coredns/coredns/plugin/transfer"
 
@@ -146,19 +145,6 @@ func autoParse(c *caddy.Controller) (Auto, error) {
 					return a, plugin.Error("file", err)
 				}
 				a.loader.ReloadInterval = d
-
-			case "upstream":
-				// remove soon
-				c.RemainingArgs() // eat remaining args
-
-			case "transfer":
-				t, _, e := parse.Transfer(c, false)
-				if e != nil {
-					return a, e
-				}
-				if t != nil {
-					a.loader.transferTo = append(a.loader.transferTo, t...)
-				}
 
 			default:
 				return Auto{}, c.Errf("unknown property '%s'", c.Val())

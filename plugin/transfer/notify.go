@@ -12,6 +12,10 @@ import (
 // Notify will send notifies to all configured to hosts IP addresses. If the zone isn't known
 // to t an error will be returned.
 func (t *Transfer) Notify(zone string) error {
+	if t == nil { // t might be nil, mostly expected in tests, so intercept and to a noop in that case
+		return nil
+	}
+
 	m := new(dns.Msg)
 	m.SetNotify(zone)
 	c := new(dns.Client)

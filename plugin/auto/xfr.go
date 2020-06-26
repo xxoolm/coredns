@@ -1,4 +1,4 @@
-package file
+package auto
 
 import (
 	"github.com/coredns/coredns/plugin/file/tree"
@@ -8,12 +8,15 @@ import (
 )
 
 // Transfer implements the transfer.Transfer interface.
-func (f File) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
-	z, ok := f.Zones.Z[zone]
+func (a Auto) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
+	a.Zones.RLock()
+	z, ok := a.Zones.Z[zone]
+	a.Zones.RUnlock()
+
 	if !ok || z == nil {
 		return nil, transfer.ErrNotAuthoritative
 	}
-	// get soa and apex
+
 	apex, err := z.ApexIfDefined()
 	if err != nil {
 		return nil, err
