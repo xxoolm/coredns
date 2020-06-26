@@ -20,6 +20,9 @@ func TransferIn(c *caddy.Controller) (froms []string, err error) {
 		return nil, c.Errf("unknown property %s", value)
 	case "from":
 		froms = c.RemainingArgs()
+		if len(froms) == 0 {
+			return nil, c.ArgErr()
+		}
 		for i := range froms {
 			if froms[i] != "*" {
 				normalized, err := HostPort(froms[i], transport.Port)
