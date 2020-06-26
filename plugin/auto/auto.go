@@ -10,6 +10,7 @@ import (
 	"github.com/coredns/coredns/plugin/file"
 	"github.com/coredns/coredns/plugin/metrics"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
+	"github.com/coredns/coredns/plugin/transfer"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
@@ -21,7 +22,8 @@ type (
 		Next plugin.Handler
 		*Zones
 
-		metrics *metrics.Metrics
+		metrics  *metrics.Metrics
+		transfer *transfer.Transfer
 		loader
 	}
 
