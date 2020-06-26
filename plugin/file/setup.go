@@ -25,15 +25,11 @@ func setup(c *caddy.Controller) error {
 	f := File{Zones: zones}
 	// get the transfer plugin, so we can send notifies and send notifies on startup as well.
 	c.OnStartup(func() error {
-		for _, p := range dnsserver.GetConfig(c).Handlers() {
-			if t, ok := p.(*transfer.Transfer); ok {
-				f.transfer = t
-				break
-			}
-		}
-		if f.transfer == nil {
+		t := dnsserver.GetConfig(c).Handler("transfer")
+		if t == nil {
 			return nil
 		}
+		f.transfer = t.(*transfer.Transfer) // if found this must be OK.
 		for _, n := range zones.Names {
 			f.transfer.Notify(n)
 		}
@@ -41,13 +37,8 @@ func setup(c *caddy.Controller) error {
 	})
 
 	c.OnRestartFailed(func() error {
-		for _, p := range dnsserver.GetConfig(c).Handlers() {
-			if t, ok := p.(*transfer.Transfer); ok {
-				f.transfer = t
-				break
-			}
-		}
-		if f.transfer == nil {
+		t := dnsserver.GetConfig(c).Handler("transfer")
+		if t == nil {
 			return nil
 		}
 		for _, n := range zones.Names {

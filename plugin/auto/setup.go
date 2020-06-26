@@ -12,6 +12,7 @@ import (
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/pkg/parse"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
+	"github.com/coredns/coredns/plugin/transfer"
 
 	"github.com/caddyserver/caddy"
 )
@@ -28,10 +29,13 @@ func setup(c *caddy.Controller) error {
 
 	c.OnStartup(func() error {
 		m := dnsserver.GetConfig(c).Handler("prometheus")
-		if m == nil {
-			return nil
+		if m != nil {
+			(&a).metrics = m.(*metrics.Metrics)
 		}
-		(&a).metrics = m.(*metrics.Metrics)
+		t := dnsserver.GetConfig(c).Handler("transfer")
+		if t != nil {
+			(&a).transfer = t.(*transfer.Transfer)
+		}
 		return nil
 	})
 
