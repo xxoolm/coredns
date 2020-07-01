@@ -36,7 +36,7 @@ func (p *transfererPlugin) Transfer(zone string, serial uint32) (<-chan []dns.RR
 	if zone != p.Zone {
 		return nil, ErrNotAuthoritative
 	}
-	ch := make(chan []dns.RR, 2)
+	ch := make(chan []dns.RR, 3) // sending 3 bits and don't want to block, nor do a waitgroup
 	defer close(ch)
 	ch <- []dns.RR{test.SOA(fmt.Sprintf("%s 100 IN SOA ns.dns.%s hostmaster.%s %d 7200 1800 86400 100", p.Zone, p.Zone, p.Zone, p.Serial))}
 	if serial >= p.Serial {
@@ -46,6 +46,7 @@ func (p *transfererPlugin) Transfer(zone string, serial uint32) (<-chan []dns.RR
 		test.NS(fmt.Sprintf("%s 100 IN NS ns.dns.%s", p.Zone, p.Zone)),
 		test.A(fmt.Sprintf("ns.dns.%s 100 IN A 1.2.3.4", p.Zone)),
 	}
+	ch <- []dns.RR{test.SOA(fmt.Sprintf("%s 100 IN SOA ns.dns.%s hostmaster.%s %d 7200 1800 86400 100", p.Zone, p.Zone, p.Zone, p.Serial))}
 	return ch, nil
 }
 
@@ -86,7 +87,6 @@ func newTestTransfer() Transfer {
 }
 
 func TestTransferNonZone(t *testing.T) {
-
 	transfer := newTestTransfer()
 	ctx := context.TODO()
 
@@ -111,7 +111,6 @@ func TestTransferNonZone(t *testing.T) {
 }
 
 func TestTransferNotAXFRorIXFR(t *testing.T) {
-
 	transfer := newTestTransfer()
 
 	ctx := context.TODO()
@@ -134,7 +133,6 @@ func TestTransferNotAXFRorIXFR(t *testing.T) {
 }
 
 func TestTransferAXFRExampleOrg(t *testing.T) {
-
 	transfer := newTestTransfer()
 
 	ctx := context.TODO()
@@ -151,7 +149,6 @@ func TestTransferAXFRExampleOrg(t *testing.T) {
 }
 
 func TestTransferAXFRExampleCom(t *testing.T) {
-
 	transfer := newTestTransfer()
 
 	ctx := context.TODO()
@@ -168,7 +165,6 @@ func TestTransferAXFRExampleCom(t *testing.T) {
 }
 
 func TestTransferIXFRFallback(t *testing.T) {
-
 	transfer := newTestTransfer()
 
 	testPlugin := transfer.Transferers[0].(*transfererPlugin)

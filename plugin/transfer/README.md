@@ -14,7 +14,8 @@ with AXFR fallback if the zone has changed.
 When a plugin wants to notify it's secondaries it will call back into the *transfer* plugin.
 
 The following plugins implement zone transfers using this plugin: *file*, *auto*, *secondary*, and
-*kubernetes*.
+*kubernetes*. See `transfer.go` for implementation details if you are a plugin author that wants to
+ use this plugin.
 
 ## Syntax
 
