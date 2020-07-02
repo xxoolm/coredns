@@ -15,7 +15,7 @@ When a plugin wants to notify it's secondaries it will call back into the *trans
 
 The following plugins implement zone transfers using this plugin: *file*, *auto*, *secondary*, and
 *kubernetes*. See `transfer.go` for implementation details if you are a plugin author that wants to
- use this plugin.
+use this plugin.
 
 ## Syntax
 
@@ -24,13 +24,14 @@ transfer [ZONE...] {
   to ADDRESS...
 }
 ~~~
+
  *  **ZONE** The zones *transfer* will answer zone transfer requests for. If left blank, the zones
     are inherited from the enclosing server block. To answer zone transfers for a given zone,
     there must be another plugin in the same server block that serves the same zone, and implements
     `transfer.Transferer`.
 
- *  `to` **ADDRESS...** The hosts *transfer* will transfer to. Use `*` to permit transfers to
-    all addresses. **ADDRESS** must be denoted in CIDR notation (e.g., 127.0.0.1/32) or just as plain
+ *  `to` **ADDRESS...** The hosts *transfer* will transfer to. Use `*` to permit transfers to all
+    addresses. **ADDRESS** must be denoted in CIDR notation (e.g., 127.0.0.1/32) or just as plain
     addresses. `to` may be specified multiple times.
 
 ## Examples
