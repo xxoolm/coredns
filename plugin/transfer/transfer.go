@@ -59,25 +59,17 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
 
-	// Find the first transfer instance for which the queried zone is the longest match.
-	// TODO(xxx): optimize and make it a map (or maps)
-	var x *xfr
-	zone := "" // longest zone match wins
-	for _, xfr := range t.xfrs {
-		if z := plugin.Zones(xfr.Zones).Matches(state.QName()); z != "" {
-			if z > zone {
-				zone = z
-				x = xfr
-			}
-		}
-	}
-
+	x := longestMatch(t.xfrs, state.QName())
 	if x == nil {
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
 
 	if !x.allowed(state) {
-		return dns.RcodeRefused, nil
+		// write msg here, so logging will pick it up
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeRefused)
+		w.WriteMsg(m)
+		return 0, nil
 	}
 
 	// Get serial from request if this is an IXFR.
@@ -130,6 +122,7 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 			soa = x
 		}
 		rrs = append(rrs, records...)
+		rrs = append(rrs, records...)
 		if len(rrs) > 500 {
 			ch <- &dns.Envelope{RR: rrs}
 			l += len(rrs)
@@ -153,6 +146,22 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		return 0, nil
 	}
 
+	// if we are here and we only hold 1 soa (len(rrs) == 1) and soa != nil, and IXFR fallback should
+	// be performed. We haven't send anything on ch yet, so that can be closed (and waited for), and we only
+	// need to return the SOA back to the client and return.
+	if len(rrs) == 1 && soa != nil { // soa should never be nil...
+		close(ch)
+		wg.Wait()
+
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{soa}
+		w.WriteMsg(m)
+
+		log.Infof("Outgoing noop, incremental transfer for up to date zone %q to %s for %d SOA serial", state.QName(), state.IP(), soa.Serial)
+		return 0, nil
+	}
+
 	if len(rrs) > 0 {
 		ch <- &dns.Envelope{RR: rrs}
 		l += len(rrs)
@@ -162,7 +171,11 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	close(ch) // Even though we close the channel here, we still have
 	wg.Wait() // to wait before we can return and close the connection.
 
-	log.Infof("Outgoing transfer of %d records of zone %q to %s for %d SOA serial", l, state.QName(), state.IP(), serial)
+	logserial := uint32(0)
+	if soa != nil {
+		logserial = soa.Serial
+	}
+	log.Infof("Outgoing transfer of %d records of zone %q to %s for %d SOA serial", l, state.QName(), state.IP(), logserial)
 	return 0, nil
 }
 
@@ -175,13 +188,29 @@ func (x xfr) allowed(state request.Request) bool {
 		if err != nil {
 			return false
 		}
-		// If remote IP matches we accept.
-		remote := state.IP()
-		if to == remote {
+		// If remote IP matches we accept. TODO(): make this works with ranges
+		if to == state.IP() {
 			return true
 		}
 	}
 	return false
+}
+
+// Find the first transfer instance for which the queried zone is the longest match. When nothing
+// is found nil is returned.
+func longestMatch(xfrs []*xfr, name string) *xfr {
+	// TODO(xxx): optimize and make it a map (or maps)
+	var x *xfr
+	zone := "" // longest zone match wins
+	for _, xfr := range xfrs {
+		if z := plugin.Zones(xfr.Zones).Matches(name); z != "" {
+			if z > zone {
+				zone = z
+				x = xfr
+			}
+		}
+	}
+	return x
 }
 
 // Name implements the Handler interface.

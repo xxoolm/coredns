@@ -32,7 +32,7 @@ are used.
   Value of `0` means to not scan for changes and reload. eg. `30s` checks zonefile every 30 seconds
   and reloads zone when serial changes.
 
-For enabling zone transfers look at the *tranfer* plugin.
+For enabling zone transfers look at the *transfer* plugin.
 
 All directives from the *file* plugin are supported. Note that *auto* will load all zones found,
 even though the directive might only receive queries for a specific zone. I.e:

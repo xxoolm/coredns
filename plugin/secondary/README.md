@@ -66,4 +66,4 @@ Only AXFR is supported and the retrieved zone is not committed to disk.
 
 ## Also See
 
-See the *transfer* plugin to enable zone tranfers _to_ other servers.
+See the *transfer* plugin to enable zone transfers _to_ other servers.

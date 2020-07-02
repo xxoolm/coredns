@@ -11,7 +11,7 @@ func (e *Etcd) Serial(state request.Request) uint32 {
 	return uint32(time.Now().Unix())
 }
 
-// MinTTL returns the minimal TTL implements the Transferer interface.
+// MinTTL returns the minimal TTL.
 func (e *Etcd) MinTTL(state request.Request) uint32 {
 	return 30
 }
