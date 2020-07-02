@@ -12,17 +12,17 @@ import (
 	"github.com/miekg/dns"
 )
 
-// transfererPlugin implements transfer.Transferer and plugin.Handler
+// transfererPlugin implements transfer.Transferer and plugin.Handler.
 type transfererPlugin struct {
 	Zone   string
 	Serial uint32
 	Next   plugin.Handler
 }
 
-// Name implements plugin.Handler
+// Name implements plugin.Handler.
 func (*transfererPlugin) Name() string { return "transfererplugin" }
 
-// ServeDNS implements plugin.Handler
+// ServeDNS implements plugin.Handler.
 func (p *transfererPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	if r.Question[0].Name != p.Zone {
 		return p.Next.ServeDNS(ctx, w, r)
@@ -31,7 +31,7 @@ func (p *transfererPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r
 }
 
 // Transfer implements transfer.Transferer - it returns a static AXFR response, or
-// if serial is current, an abbreviated IXFR response
+// if serial is current, an abbreviated IXFR response.
 func (p *transfererPlugin) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
 	if zone != p.Zone {
 		return nil, ErrNotAuthoritative
@@ -52,10 +52,10 @@ func (p *transfererPlugin) Transfer(zone string, serial uint32) (<-chan []dns.RR
 
 type terminatingPlugin struct{}
 
-// Name implements plugin.Handler
+// Name implements plugin.Handler.
 func (*terminatingPlugin) Name() string { return "testplugin" }
 
-// ServeDNS implements plugin.Handler that returns NXDOMAIN for all requests
+// ServeDNS implements plugin.Handler that returns NXDOMAIN for all requests.
 func (*terminatingPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeNameError)
@@ -63,13 +63,13 @@ func (*terminatingPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r 
 	return dns.RcodeNameError, nil
 }
 
-func newTestTransfer() Transfer {
+func newTestTransfer() *Transfer {
 	nextPlugin1 := transfererPlugin{Zone: "example.com.", Serial: 12345}
 	nextPlugin2 := transfererPlugin{Zone: "example.org.", Serial: 12345}
 	nextPlugin2.Next = &terminatingPlugin{}
 	nextPlugin1.Next = &nextPlugin2
 
-	transfer := Transfer{
+	transfer := &Transfer{
 		Transferers: []Transferer{&nextPlugin1, &nextPlugin2},
 		xfrs: []*xfr{
 			{

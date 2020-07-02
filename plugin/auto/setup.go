@@ -146,6 +146,10 @@ func autoParse(c *caddy.Controller) (Auto, error) {
 				}
 				a.loader.ReloadInterval = d
 
+			case "upstream":
+				// remove soon
+				c.RemainingArgs() // eat remaining args
+
 			default:
 				return Auto{}, c.Errf("unknown property '%s'", c.Val())
 			}

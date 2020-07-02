@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/coredns/coredns/plugin"
@@ -24,12 +25,23 @@ func (k *Kubernetes) Transfer(zone string, serial uint32) (<-chan []dns.RR, erro
 	}
 
 	ch := make(chan []dns.RR)
-	ch <- soa
 
 	zonePath := msg.Path(zone, "coredns")
 	serviceList := k.APIConn.ServiceList()
 
 	go func() {
+		// ixfr fallback
+		if serial != 0 && soa[0].(*dns.SOA).Serial == serial {
+			ch <- soa
+			close(ch)
+			return
+		}
+		ch <- soa
+
+		sort.Slice(serviceList, func(i, j int) bool {
+			return serviceList[i].Name < serviceList[j].Name
+		})
+
 		for _, svc := range serviceList {
 			if !k.namespaceExposed(svc.Namespace) {
 				continue

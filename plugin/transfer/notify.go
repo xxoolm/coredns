@@ -3,14 +3,13 @@ package transfer
 import (
 	"fmt"
 
-	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/rcode"
 
 	"github.com/miekg/dns"
 )
 
 // Notify will send notifies to all configured to hosts IP addresses. If the zone isn't known
-// to t an error will be returned.
+// to t an error will be returned. The string zone must be lowercased.
 func (t *Transfer) Notify(zone string) error {
 	if t == nil { // t might be nil, mostly expected in tests, so intercept and to a noop in that case
 		return nil
@@ -20,16 +19,7 @@ func (t *Transfer) Notify(zone string) error {
 	m.SetNotify(zone)
 	c := new(dns.Client)
 
-	// Find the first transfer instance for which the queried zone is a subdomain. This is copied from transfer.go
-	// XXX(miek): shouldn't this be an exact match?
-	var x *xfr
-	for _, xfr := range t.xfrs {
-		zone := plugin.Zones(xfr.Zones).Matches(zone)
-		if zone == "" {
-			continue
-		}
-		x = xfr
-	}
+	x := longestMatch(t.xfrs, zone)
 	if x == nil {
 		return fmt.Errorf("no such zone registred in the transfer plugin: %s", zone)
 	}
