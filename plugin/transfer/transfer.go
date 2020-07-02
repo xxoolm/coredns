@@ -122,7 +122,6 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 			soa = x
 		}
 		rrs = append(rrs, records...)
-		rrs = append(rrs, records...)
 		if len(rrs) > 500 {
 			ch <- &dns.Envelope{RR: rrs}
 			l += len(rrs)

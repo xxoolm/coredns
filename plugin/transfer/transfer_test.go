@@ -92,10 +92,10 @@ func TestTransferNonZone(t *testing.T) {
 
 	for _, tc := range []string{"sub.example.org.", "example.test."} {
 		w := dnstest.NewRecorder(&test.ResponseWriter{})
-		dnsmsg := &dns.Msg{}
-		dnsmsg.SetAxfr(tc)
+		m := &dns.Msg{}
+		m.SetAxfr(tc)
 
-		_, err := transfer.ServeDNS(ctx, w, dnsmsg)
+		_, err := transfer.ServeDNS(ctx, w, m)
 		if err != nil {
 			t.Error(err)
 		}
@@ -115,10 +115,10 @@ func TestTransferNotAXFRorIXFR(t *testing.T) {
 
 	ctx := context.TODO()
 	w := dnstest.NewRecorder(&test.ResponseWriter{})
-	dnsmsg := &dns.Msg{}
-	dnsmsg.SetQuestion("test.domain.", dns.TypeA)
+	m := &dns.Msg{}
+	m.SetQuestion("test.domain.", dns.TypeA)
 
-	_, err := transfer.ServeDNS(ctx, w, dnsmsg)
+	_, err := transfer.ServeDNS(ctx, w, m)
 	if err != nil {
 		t.Error(err)
 	}
@@ -137,10 +137,10 @@ func TestTransferAXFRExampleOrg(t *testing.T) {
 
 	ctx := context.TODO()
 	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
-	dnsmsg := &dns.Msg{}
-	dnsmsg.SetAxfr(transfer.xfrs[0].Zones[0])
+	m := &dns.Msg{}
+	m.SetAxfr(transfer.xfrs[0].Zones[0])
 
-	_, err := transfer.ServeDNS(ctx, w, dnsmsg)
+	_, err := transfer.ServeDNS(ctx, w, m)
 	if err != nil {
 		t.Error(err)
 	}
@@ -153,33 +153,10 @@ func TestTransferAXFRExampleCom(t *testing.T) {
 
 	ctx := context.TODO()
 	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
-	dnsmsg := &dns.Msg{}
-	dnsmsg.SetAxfr(transfer.xfrs[1].Zones[0])
+	m := &dns.Msg{}
+	m.SetAxfr(transfer.xfrs[1].Zones[0])
 
-	_, err := transfer.ServeDNS(ctx, w, dnsmsg)
-	if err != nil {
-		t.Error(err)
-	}
-
-	validateAXFRResponse(t, w)
-}
-
-func TestTransferIXFRFallback(t *testing.T) {
-	transfer := newTestTransfer()
-
-	testPlugin := transfer.Transferers[0].(*transfererPlugin)
-
-	ctx := context.TODO()
-	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
-	dnsmsg := &dns.Msg{}
-	dnsmsg.SetIxfr(
-		transfer.xfrs[0].Zones[0],
-		testPlugin.Serial-1,
-		"ns.dns."+testPlugin.Zone,
-		"hostmaster.dns."+testPlugin.Zone,
-	)
-
-	_, err := transfer.ServeDNS(ctx, w, dnsmsg)
+	_, err := transfer.ServeDNS(ctx, w, m)
 	if err != nil {
 		t.Error(err)
 	}
@@ -188,28 +165,21 @@ func TestTransferIXFRFallback(t *testing.T) {
 }
 
 func TestTransferIXFRCurrent(t *testing.T) {
-
 	transfer := newTestTransfer()
 
 	testPlugin := transfer.Transferers[0].(*transfererPlugin)
 
 	ctx := context.TODO()
 	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
-	dnsmsg := &dns.Msg{}
-	dnsmsg.SetIxfr(
-		transfer.xfrs[0].Zones[0],
-		testPlugin.Serial,
-		"ns.dns."+testPlugin.Zone,
-		"hostmaster.dns."+testPlugin.Zone,
-	)
+	m := &dns.Msg{}
+	m.SetIxfr(transfer.xfrs[0].Zones[0], testPlugin.Serial, "ns.dns."+testPlugin.Zone, "hostmaster.dns."+testPlugin.Zone)
 
-	_, err := transfer.ServeDNS(ctx, w, dnsmsg)
+	_, err := transfer.ServeDNS(ctx, w, m)
 	if err != nil {
 		t.Error(err)
 	}
 
 	if len(w.Msgs) == 0 {
-		t.Logf("%+v\n", w)
 		t.Fatal("Did not get back a zone response")
 	}
 
@@ -224,9 +194,31 @@ func TestTransferIXFRCurrent(t *testing.T) {
 	}
 }
 
+func TestTransferIXFRFallback(t *testing.T) {
+	transfer := newTestTransfer()
+
+	testPlugin := transfer.Transferers[0].(*transfererPlugin)
+
+	ctx := context.TODO()
+	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
+	m := &dns.Msg{}
+	m.SetIxfr(
+		transfer.xfrs[0].Zones[0],
+		testPlugin.Serial-1,
+		"ns.dns."+testPlugin.Zone,
+		"hostmaster.dns."+testPlugin.Zone,
+	)
+
+	_, err := transfer.ServeDNS(ctx, w, m)
+	if err != nil {
+		t.Error(err)
+	}
+
+	validateAXFRResponse(t, w)
+}
+
 func validateAXFRResponse(t *testing.T, w *dnstest.MultiRecorder) {
 	if len(w.Msgs) == 0 {
-		t.Logf("%+v\n", w)
 		t.Fatal("Did not get back a zone response")
 	}
 
@@ -271,10 +263,10 @@ func TestTransferNotAllowed(t *testing.T) {
 
 	ctx := context.TODO()
 	w := dnstest.NewRecorder(&test.ResponseWriter{})
-	dnsmsg := &dns.Msg{}
-	dnsmsg.SetAxfr(transfer.xfrs[0].Zones[0])
+	m := &dns.Msg{}
+	m.SetAxfr(transfer.xfrs[0].Zones[0])
 
-	_, err := transfer.ServeDNS(ctx, w, dnsmsg)
+	_, err := transfer.ServeDNS(ctx, w, m)
 
 	if err != nil {
 		t.Error(err)
