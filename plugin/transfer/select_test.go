@@ -37,7 +37,7 @@ func TestZoneSelection(t *testing.T) {
 		xfrs: []*xfr{
 			{
 				Zones: []string{"example.org."},
-				to:    []string{"*"},
+				to:    []string{"192.0.2.1"}, // RFC 5737 IP, no interface should have this address.
 			},
 			{
 				Zones: []string{"sub.example.org."},
@@ -49,6 +49,9 @@ func TestZoneSelection(t *testing.T) {
 	r.SetAxfr("sub.example.org.")
 	w := dnstest.NewRecorder(&test.ResponseWriter{})
 	_, err := tr.ServeDNS(context.TODO(), w, r)
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
 	if x := err.Error(); x != "sub.example.org." {
 		t.Errorf("Expected transfer for zone %s, got %s", "sub.example.org", x)
 	}

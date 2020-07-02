@@ -59,18 +59,19 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
 
-	// Find the first transfer instance for which the queried zone is an exact match.
+	// Find the first transfer instance for which the queried zone is the longest match.
 	// TODO(xxx): optimize and make it a map (or maps)
 	var x *xfr
-Search:
+	zone := "" // longest zone match wins
 	for _, xfr := range t.xfrs {
-		for _, z := range xfr.Zones {
-			if z == state.Name() {
+		if z := plugin.Zones(xfr.Zones).Matches(state.QName()); z != "" {
+			if z > zone {
+				zone = z
 				x = xfr
-				break Search
 			}
 		}
 	}
+
 	if x == nil {
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
