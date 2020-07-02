@@ -270,17 +270,17 @@ func TestTransferNotAllowed(t *testing.T) {
 	}
 
 	ctx := context.TODO()
-	w := dnstest.NewMultiRecorder(&test.ResponseWriter{})
+	w := dnstest.NewRecorder(&test.ResponseWriter{})
 	dnsmsg := &dns.Msg{}
 	dnsmsg.SetAxfr(transfer.xfrs[0].Zones[0])
 
-	rcode, err := transfer.ServeDNS(ctx, w, dnsmsg)
+	_, err := transfer.ServeDNS(ctx, w, dnsmsg)
 
 	if err != nil {
 		t.Error(err)
 	}
 
-	if rcode != dns.RcodeRefused {
-		t.Errorf("Expected REFUSED response code, got %s", dns.RcodeToString[rcode])
+	if w.Msg.Rcode != dns.RcodeRefused {
+		t.Errorf("Expected REFUSED response code, got %s", dns.RcodeToString[w.Msg.Rcode])
 	}
 }
