@@ -31,7 +31,8 @@ type xfr struct {
 type Transferer interface {
 	// Transfer returns a channel to which it writes responses to the transfer request.
 	// If the plugin is not authoritative for the zone, it should immediately return the
-	// Transfer.ErrNotAuthoritative error.
+	// transfer.ErrNotAuthoritative error. This is important otherwise the transfer plugin can
+	// use plugin X while it should transfer the data from plugin Y.
 	//
 	// If serial is 0, handle as an AXFR request. Transfer should send all records
 	// in the zone to the channel. The SOA should be written to the channel first, followed
@@ -51,18 +52,6 @@ var (
 	ErrNotAuthoritative = errors.New("not authoritative for zone")
 )
 
-// From file transfer code:
-/*
-	// For IXFR we take the SOA in the IXFR message (if there), compare it what we have and then decide to do an
-	// AXFR or just reply with one SOA message back.
-	if state.QType() == dns.TypeIXFR {
-		code, _ := x.ServeIxfr(ctx, w, r)
-		if plugin.ClientWrite(code) {
-			return code, nil
-		}
-	}
-*/
-
 // ServeDNS implements the plugin.Handler interface.
 func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
@@ -70,18 +59,19 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
 
-	// Find the first transfer instance for which the queried zone is a subdomain.
+	// Find the first transfer instance for which the queried zone is an exact match.
+	// TODO(xxx): optimize and make it a map (or maps)
 	var x *xfr
+Search:
 	for _, xfr := range t.xfrs {
-		zone := plugin.Zones(xfr.Zones).Matches(state.Name())
-		if zone == "" {
-			continue
+		for _, z := range xfr.Zones {
+			if z == state.Name() {
+				x = xfr
+				break Search
+			}
 		}
-		x = xfr
 	}
 	if x == nil {
-		// Requested zone did not match any transfer instance zones.
-		// Pass request down chain in case later plugins are capable of handling transfer requests themselves.
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
 
