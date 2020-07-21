@@ -6,20 +6,24 @@ require (
 	github.com/Azure/azure-sdk-for-go v40.6.0+incompatible
 	github.com/Azure/go-autorest/autorest v0.11.2
 	github.com/Azure/go-autorest/autorest/azure/auth v0.5.0
+	github.com/Azure/go-autorest/autorest/to v0.2.0 // indirect
 	github.com/DataDog/datadog-go v3.5.0+incompatible // indirect
 	github.com/Shopify/sarama v1.21.0 // indirect
 	github.com/apache/thrift v0.13.0 // indirect
 	github.com/aws/aws-sdk-go v1.33.7
-	github.com/caddyserver/caddy v1.0.5
 	github.com/cenkalti/backoff/v4 v4.0.2
+	github.com/coredns/caddy v1.1.0
 	github.com/dnstap/golang-dnstap v0.2.0
+	github.com/dustin/go-humanize v1.0.0 // indirect
 	github.com/farsightsec/golang-framestream v0.0.0-20190425193708-fa4b164d59b8
 	github.com/golang/protobuf v1.4.2
 	github.com/gophercloud/gophercloud v0.9.0 // indirect
+	github.com/gorilla/websocket v1.4.0 // indirect
 	github.com/grpc-ecosystem/grpc-opentracing v0.0.0-20180507213350-8e809c8a8645
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/imdario/mergo v0.3.9 // indirect
 	github.com/infobloxopen/go-trees v0.0.0-20190313150506-2af4e13f9062
+	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
 	github.com/kr/pretty v0.2.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1
 	github.com/miekg/dns v1.1.30

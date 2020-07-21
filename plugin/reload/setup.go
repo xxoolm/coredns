@@ -10,7 +10,7 @@ import (
 	"github.com/coredns/coredns/plugin/metrics"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 
-	"github.com/caddyserver/caddy"
+	"github.com/coredns/caddy"
 )
 
 var log = clog.NewWithPlugin("reload")
