@@ -23,6 +23,10 @@ func (t *Transfer) Notify(zone string) error {
 	if x == nil {
 		return fmt.Errorf("no such zone registred in the transfer plugin: %s", zone)
 	}
+	if len(x.to) == 0 {
+		// Bail out here to skip the bogus debug line below.
+		return nil
+	}
 
 	var err1 error
 	for _, t := range x.to {
