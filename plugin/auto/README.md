@@ -76,7 +76,7 @@ org {
 }
 ~~~
 
-## Also
+## Also See
 
 Use the *root* plugin to help you specify the location of the zone files. See the *transfer* plugin
 to enable outgoing zone transfers.
