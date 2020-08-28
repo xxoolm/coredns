@@ -9,6 +9,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/etcd/msg"
+	"github.com/coredns/coredns/plugin/pkg/dnsutil"
 	"github.com/coredns/coredns/plugin/transfer"
 	"github.com/coredns/coredns/request"
 
@@ -18,6 +19,11 @@ import (
 
 // Transfer implements the transfer.Transfer interface.
 func (k *Kubernetes) Transfer(zone string, serial uint32) (<-chan []dns.RR, error) {
+	if dnsutil.IsReverse(zone) != 0 {
+		// disallow transfer for reverse zones because we can't generate that.
+		return nil, transfer.ErrNotAuthoritative
+	}
+
 	// state is not used here, hence the empty request.Request{]
 	soa, err := plugin.SOA(context.TODO(), k, zone, request.Request{}, plugin.Options{})
 	if err != nil {
