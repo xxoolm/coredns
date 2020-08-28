@@ -6,7 +6,7 @@ import (
 	"github.com/coredns/coredns/request"
 )
 
-// Serial returns the serial number to use.
+// Serial returns the current time as the zone serial number to use.
 func (e *Etcd) Serial(state request.Request) uint32 {
 	return uint32(time.Now().Unix())
 }
