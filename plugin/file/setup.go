@@ -22,7 +22,7 @@ func setup(c *caddy.Controller) error {
 	}
 
 	f := File{Zones: zones}
-	// get the transfer plugin, so we can send notifies and send notifies on startup as well.
+	// Get the transfer plugin, so we can send notifies and send notifies on startup as well.
 	c.OnStartup(func() error {
 		t := dnsserver.GetConfig(c).Handler("transfer")
 		if t == nil {
