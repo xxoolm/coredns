@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"net"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 func TestKubernetesAXFR(t *testing.T) {
 	k := New([]string{"cluster.local."})
 	k.APIConn = &APIConnServeTest{}
+	k.localIPs = []net.IP{net.IPv4allsys, net.IPv6loopback} // these happen to exist in net pkg, use them.
 	k.Namespaces = map[string]struct{}{"testns": {}}
 
 	dnsmsg := &dns.Msg{}
@@ -25,6 +27,7 @@ func TestKubernetesAXFR(t *testing.T) {
 func TestKubernetesIXFRFallback(t *testing.T) {
 	k := New([]string{"cluster.local."})
 	k.APIConn = &APIConnServeTest{}
+	k.localIPs = []net.IP{net.IPv4allsys, net.IPv6loopback}
 	k.Namespaces = map[string]struct{}{"testns": {}}
 
 	dnsmsg := &dns.Msg{}
@@ -91,6 +94,9 @@ func validateAXFR(t *testing.T, ch <-chan []dns.RR) {
 
 const expectedZone = `
 cluster.local.	5	IN	SOA	ns.dns.cluster.local. hostmaster.cluster.local. 3 7200 1800 86400 5
+cluster.local.	5	IN	NS	ns.dns.cluster.local.
+ns.dns.cluster.local.	5	IN	A	224.0.0.1
+ns.dns.cluster.local.	5	IN	AAAA	::1
 external.testns.svc.cluster.local.	5	IN	CNAME	ext.interwebs.test.
 external-to-service.testns.svc.cluster.local.	5	IN	CNAME	svc1.testns.svc.cluster.local.
 hdls1.testns.svc.cluster.local.	5	IN	A	172.0.0.2

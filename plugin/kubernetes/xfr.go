@@ -44,6 +44,23 @@ func (k *Kubernetes) Transfer(zone string, serial uint32) (<-chan []dns.RR, erro
 		}
 		ch <- soa
 
+		// NS records need to be done separately because we synthesize them. The NS name we use is ns.dns.<zone>
+		// nsAddrs returns the *addresses* of the ns.dns.<zone> so we need to include those *and* the NS record itself (only one).
+		nss := k.nsAddrs(false, zone)
+		ns := &dns.NS{Hdr: dns.RR_Header{
+			Name:   zone,
+			Ttl:    k.ttl,
+			Class:  dns.ClassINET,
+			Rrtype: dns.TypeNS},
+			Ns: dnsutil.Join("ns.dns", zone),
+		}
+
+		ch <- []dns.RR{ns}
+		// it may be len(nss) == 0 in tests - maybe even in weird prod cases? If non-empty send
+		if len(nss) > 0 {
+			ch <- nss
+		}
+
 		sort.Slice(serviceList, func(i, j int) bool {
 			return serviceList[i].Name < serviceList[j].Name
 		})

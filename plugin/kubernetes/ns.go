@@ -70,6 +70,7 @@ func (k *Kubernetes) nsAddrs(external bool, zone string) []dns.RR {
 		if ip.To4() == nil {
 			rr := new(dns.AAAA)
 			rr.Hdr.Class = dns.ClassINET
+			rr.Hdr.Ttl = k.ttl
 			rr.Hdr.Rrtype = dns.TypeAAAA
 			rr.Hdr.Name = svcNames[i]
 			rr.AAAA = ip
@@ -78,6 +79,7 @@ func (k *Kubernetes) nsAddrs(external bool, zone string) []dns.RR {
 		}
 		rr := new(dns.A)
 		rr.Hdr.Class = dns.ClassINET
+		rr.Hdr.Ttl = k.ttl
 		rr.Hdr.Rrtype = dns.TypeA
 		rr.Hdr.Name = svcNames[i]
 		rr.A = ip
