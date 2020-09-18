@@ -58,9 +58,9 @@ func recordsParse(c *caddy.Controller) (*Records, error) {
 		// the record we just set the ORIGIN to the correct value and magic will happen. If no origin we set it to "."
 
 		for c.NextBlock() {
+			s := c.Val() + " "
+			s += strings.Join(c.RemainingArgs(), " ")
 			for _, o := range re.origins {
-				s := c.Val() + " "
-				s += strings.Join(c.RemainingArgs(), " ")
 				rr, err := dns.NewRR("$ORIGIN " + o + "\n" + s + "\n")
 				if err != nil {
 					return nil, err
