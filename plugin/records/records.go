@@ -17,6 +17,7 @@ type Records struct {
 	Next plugin.Handler
 }
 
+// ServeDNS implements the plugin.Handle interface.
 func (re *Records) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 	qname := state.Name()
@@ -65,8 +66,10 @@ func (re *Records) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	return dns.RcodeSuccess, nil
 }
 
+// Name implements the plugin.Handle interface.
 func (re *Records) Name() string { return "records" }
 
+// New returns a pointer to a new and intialized Records.
 func New() *Records {
 	re := new(Records)
 	re.m = make(map[string][]dns.RR)
