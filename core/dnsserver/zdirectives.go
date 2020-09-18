@@ -39,6 +39,7 @@ var Directives = []string{
 	"template",
 	"transfer",
 	"hosts",
+	"records",
 	"route53",
 	"azure",
 	"clouddns",
