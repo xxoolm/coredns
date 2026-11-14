@@ -21,6 +21,7 @@ func TestClosestEncloser(t *testing.T) {
 		{"blaat.www.miek.nl.", "www.miek.nl."},
 		{"www.blaat.miek.nl.", "miek.nl."},
 		{"blaat.a.miek.nl.", "a.miek.nl."},
+		{"blaat.z.a.miek.nl.", "a.miek.nl."},
 	}
 
 	for _, tc := range tests {
@@ -35,4 +36,28 @@ func TestClosestEncloser(t *testing.T) {
 			t.Errorf("Expected ce to be %s for %s, got %s", tc.out, tc.in, ce.Name())
 		}
 	}
+}
+
+func TestClosestEncloserConcurrentSetData(t *testing.T) {
+	z, err := Parse(strings.NewReader(dbMiekNL), testzone, "stdin", 0)
+	if err != nil {
+		t.Fatalf("Expect no error when reading zone, got %q", err)
+	}
+
+	apex, zoneTree := z.snapshot()
+	start := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-start
+		for range 10000 {
+			z.setData(apex, zoneTree)
+		}
+	}()
+
+	close(start)
+	for range 10000 {
+		z.ClosestEncloser("blaat.www.miek.nl.")
+	}
+	<-done
 }

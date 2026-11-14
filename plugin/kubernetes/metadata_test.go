@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/coredns/coredns/plugin/metadata"
@@ -29,8 +30,8 @@ var metadataCases = []struct {
 			"kubernetes/endpoint":  "",
 			"kubernetes/kind":      "pod",
 			"kubernetes/namespace": "podns",
-			"kubernetes/port-name": "*",
-			"kubernetes/protocol":  "*",
+			"kubernetes/port-name": "",
+			"kubernetes/protocol":  "",
 			"kubernetes/service":   "10-240-0-1",
 		},
 	},
@@ -40,8 +41,8 @@ var metadataCases = []struct {
 			"kubernetes/endpoint":  "",
 			"kubernetes/kind":      "svc",
 			"kubernetes/namespace": "ns",
-			"kubernetes/port-name": "*",
-			"kubernetes/protocol":  "*",
+			"kubernetes/port-name": "",
+			"kubernetes/protocol":  "",
 			"kubernetes/service":   "s",
 		},
 	},
@@ -52,8 +53,8 @@ var metadataCases = []struct {
 			"kubernetes/endpoint":  "",
 			"kubernetes/kind":      "svc",
 			"kubernetes/namespace": "ns",
-			"kubernetes/port-name": "*",
-			"kubernetes/protocol":  "*",
+			"kubernetes/port-name": "",
+			"kubernetes/protocol":  "",
 			"kubernetes/service":   "s",
 		},
 	},
@@ -76,8 +77,21 @@ var metadataCases = []struct {
 			"kubernetes/endpoint":  "ep",
 			"kubernetes/kind":      "svc",
 			"kubernetes/namespace": "ns",
-			"kubernetes/port-name": "*",
-			"kubernetes/protocol":  "*",
+			"kubernetes/port-name": "",
+			"kubernetes/protocol":  "",
+			"kubernetes/service":   "s",
+		},
+	},
+	{
+		Qname: "ep.c1.s.ns.svc.clusterset.local.", Qtype: dns.TypeA,
+		RemoteIP: "10.10.10.10",
+		Md: map[string]string{
+			"kubernetes/cluster":   "c1",
+			"kubernetes/endpoint":  "ep",
+			"kubernetes/kind":      "svc",
+			"kubernetes/namespace": "ns",
+			"kubernetes/port-name": "",
+			"kubernetes/protocol":  "",
 			"kubernetes/service":   "s",
 		},
 	},
@@ -103,14 +117,19 @@ func mapsDiffer(a, b map[string]string) bool {
 }
 
 func TestMetadata(t *testing.T) {
-	k := New([]string{"cluster.local."})
+	k := New([]string{"cluster.local.", "clusterset.local."})
+	k.opts.multiclusterZones = []string{"clusterset.local."}
 	k.APIConn = &APIConnServeTest{}
 
 	for i, tc := range metadataCases {
 		ctx := metadata.ContextWithMetadata(context.Background())
+		zone := "."
+		if strings.Contains(tc.Qname, "clusterset.local") {
+			zone = "clusterset.local."
+		}
 		state := request.Request{
 			Req:  &dns.Msg{Question: []dns.Question{{Name: tc.Qname, Qtype: tc.Qtype}}},
-			Zone: ".",
+			Zone: zone,
 			W:    &test.ResponseWriter{RemoteIP: tc.RemoteIP},
 		}
 
@@ -141,8 +160,10 @@ func TestMetadataPodsVerified(t *testing.T) {
 	k.Metadata(ctx, state)
 
 	expect := map[string]string{
-		"kubernetes/client-namespace": "podns",
-		"kubernetes/client-pod-name":  "foo",
+		"kubernetes/client-namespace":                    "podns",
+		"kubernetes/client-pod-name":                     "foo",
+		"kubernetes/client-label/app.kubernetes.io/name": "foo",
+		"kubernetes/client-label/bar":                    "baz",
 	}
 
 	md := make(map[string]string)

@@ -1,11 +1,12 @@
 // Package dns64 implements a plugin that performs DNS64.
 //
-// See: RFC 6147 (https://tools.ietf.org/html/rfc6147)
+// See: RFC 6147 (https://www.rfc-editor.org/info/rfc6147/)
 package dns64
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -36,7 +37,7 @@ type DNS64 struct {
 func (d *DNS64) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	// Don't proxy if we don't need to.
 	if !d.requestShouldIntercept(&request.Request{W: w, Req: r}) {
-		return d.Next.ServeDNS(ctx, w, r)
+		return plugin.NextOrFailure(d.Name(), d.Next, ctx, w, r)
 	}
 
 	// Pass the request to the next plugin in the chain, but intercept the response.
@@ -62,7 +63,7 @@ func (d *DNS64) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	RequestsTranslatedCount.WithLabelValues(metrics.WithServer(ctx)).Inc()
 	w.WriteMsg(msg)
-	return msg.MsgHdr.Rcode, nil
+	return dns.RcodeSuccess, nil
 }
 
 // Name implements the Handler interface.
@@ -122,6 +123,9 @@ func (d *DNS64) DoDNS64(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, o
 	if err != nil {
 		return nil, err
 	}
+	if resp == nil {
+		return nil, fmt.Errorf("dns64: upstream returned no response")
+	}
 	out := d.Synthesize(r, origResponse, resp)
 	return out, nil
 }
@@ -130,6 +134,7 @@ func (d *DNS64) DoDNS64(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, o
 func (d *DNS64) Synthesize(origReq, origResponse, resp *dns.Msg) *dns.Msg {
 	ret := dns.Msg{}
 	ret.SetReply(origReq)
+	ret.Rcode = resp.Rcode
 
 	// persist truncated state of AAAA response
 	ret.Truncated = resp.Truncated
@@ -160,10 +165,7 @@ func (d *DNS64) Synthesize(origReq, origResponse, resp *dns.Msg) *dns.Msg {
 		aaaa, _ := to6(d.Prefix, rr.(*dns.A).A)
 
 		// ttl is min of SOA TTL and A TTL
-		ttl := SOATtl
-		if rr.Header().Ttl < ttl {
-			ttl = rr.Header().Ttl
-		}
+		ttl := min(rr.Header().Ttl, SOATtl)
 
 		// Replace A answer with a DNS64 AAAA answer
 		ret.Answer = append(ret.Answer, &dns.AAAA{

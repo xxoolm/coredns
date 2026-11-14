@@ -11,11 +11,7 @@ import (
 
 func TestAuto(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := os.MkdirTemp(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpdir)
+	tmpdir := t.TempDir()
 
 	corefile := `org:0 {
 		auto {
@@ -36,8 +32,8 @@ func TestAuto(t *testing.T) {
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 
 	// Write db.example.org to get example.org.
@@ -45,11 +41,15 @@ func TestAuto(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
-
-	resp, err = dns.Exchange(m, udp)
-	if err != nil {
-		t.Fatal("Expected to receive reply, but didn't")
+	for start := time.Now(); time.Since(start) < 5*time.Second; {
+		resp, err = dns.Exchange(m, udp)
+		if err != nil {
+			t.Fatal("Expected to receive reply, but didn't")
+		}
+		if len(resp.Answer) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(resp.Answer) != 1 {
 		t.Fatalf("Expected 1 RR in the answer section, got %d", len(resp.Answer))
@@ -58,23 +58,24 @@ func TestAuto(t *testing.T) {
 	// Remove db.example.org again.
 	os.Remove(filepath.Join(tmpdir, "db.example.org"))
 
-	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
-	resp, err = dns.Exchange(m, udp)
-	if err != nil {
-		t.Fatal("Expected to receive reply, but didn't")
+	for start := time.Now(); time.Since(start) < 5*time.Second; {
+		resp, err = dns.Exchange(m, udp)
+		if err != nil {
+			t.Fatal("Expected to receive reply, but didn't")
+		}
+		if resp.Rcode == dns.RcodeRefused {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 }
 
 func TestAutoNonExistentZone(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := os.MkdirTemp(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpdir)
+	tmpdir := t.TempDir()
 
 	corefile := `.:0 {
 		auto {
@@ -101,19 +102,15 @@ func TestAutoNonExistentZone(t *testing.T) {
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 }
 
 func TestAutoAXFR(t *testing.T) {
 	t.Parallel()
 
-	tmpdir, err := os.MkdirTemp(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpdir)
+	tmpdir := t.TempDir()
 
 	corefile := `org:0 {
 		auto {

@@ -6,6 +6,8 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/dnstap/msg"
+	"github.com/coredns/coredns/plugin/pkg/replacer"
+	"github.com/coredns/coredns/request"
 
 	tap "github.com/dnstap/golang-dnstap"
 	"github.com/miekg/dns"
@@ -13,20 +15,55 @@ import (
 
 // Dnstap is the dnstap handler.
 type Dnstap struct {
-	Next plugin.Handler
-	io   tapper
+	Next     plugin.Handler
+	io       tapper
+	listener *listener
+	repl     replacer.Replacer
 
 	// IncludeRawMessage will include the raw DNS message into the dnstap messages if true.
-	IncludeRawMessage bool
+	IncludeRawMessage   bool
+	Identity            []byte
+	Version             []byte
+	ExtraFormat         string
+	MultipleTcpWriteBuf int // *Mb
+	MultipleQueue       int // *10000
 }
 
-// TapMessage sends the message m to the dnstap interface.
-func (h Dnstap) TapMessage(m *tap.Message) {
+// TapMessage sends the message m to the dnstap interface, without populating "Extra" field.
+func (h *Dnstap) TapMessage(m *tap.Message) {
+	if h.ExtraFormat == "" {
+		h.tapWithExtra(m, nil)
+	} else {
+		h.tapWithExtra(m, []byte(h.ExtraFormat))
+	}
+}
+
+// TapMessageWithMetadata sends the message m to the dnstap interface, with "Extra" field being populated.
+func (h *Dnstap) TapMessageWithMetadata(ctx context.Context, m *tap.Message, state request.Request) {
+	if h.ExtraFormat == "" {
+		h.tapWithExtra(m, nil)
+		return
+	}
+	extraStr := h.repl.Replace(ctx, state, nil, h.ExtraFormat)
+	h.tapWithExtra(m, []byte(extraStr))
+}
+
+func (h *Dnstap) tapWithExtra(m *tap.Message, extra []byte) {
 	t := tap.Dnstap_MESSAGE
-	h.io.Dnstap(tap.Dnstap{Type: &t, Message: m})
+	payload := &tap.Dnstap{Type: &t, Message: m, Identity: h.Identity, Version: h.Version, Extra: extra}
+
+	// Send to outgoing connection if configured
+	if h.io != nil {
+		h.io.Dnstap(payload)
+	}
+
+	// Broadcast to incoming listeners if configured
+	if h.listener != nil {
+		h.listener.Dnstap(payload)
+	}
 }
 
-func (h Dnstap) tapQuery(w dns.ResponseWriter, query *dns.Msg, queryTime time.Time) {
+func (h *Dnstap) tapQuery(ctx context.Context, w dns.ResponseWriter, query *dns.Msg, queryTime time.Time) {
 	q := new(tap.Message)
 	msg.SetQueryTime(q, queryTime)
 	msg.SetQueryAddress(q, w.RemoteAddr())
@@ -36,24 +73,41 @@ func (h Dnstap) tapQuery(w dns.ResponseWriter, query *dns.Msg, queryTime time.Ti
 		q.QueryMessage = buf
 	}
 	msg.SetType(q, tap.Message_CLIENT_QUERY)
-	h.TapMessage(q)
+	state := request.Request{W: w, Req: query}
+	h.TapMessageWithMetadata(ctx, q, state)
 }
 
 // ServeDNS logs the client query and response to dnstap and passes the dnstap Context.
-func (h Dnstap) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (h *Dnstap) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	rw := &ResponseWriter{
 		ResponseWriter: w,
 		Dnstap:         h,
 		query:          r,
+		ctx:            ctx,
 		queryTime:      time.Now(),
 	}
 
 	// The query tap message should be sent before sending the query to the
 	// forwarder. Otherwise, the tap messages will come out out of order.
-	h.tapQuery(w, r, rw.queryTime)
+	h.tapQuery(ctx, w, r, rw.queryTime)
 
-	return plugin.NextOrFailure(h.Name(), h.Next, ctx, rw, r)
+	rcode, err := plugin.NextOrFailure(h.Name(), h.Next, ctx, rw, r)
+
+	// When the plugin chain returns an error rcode without having written a
+	// response (e.g. it falls off the end, or returns SERVFAIL/REFUSED/FORMERR/
+	// NOTIMP), the server generates and sends the error response to the client
+	// after ServeDNS returns, so ResponseWriter.WriteMsg is never called and no
+	// CLIENT_RESPONSE is tapped. Synthesize the deferred response so dnstap
+	// consumers see a CLIENT_RESPONSE matching what the client receives, rather
+	// than a CLIENT_QUERY with no matching response (#6532).
+	if !rw.written && !plugin.ClientWrite(rcode) {
+		deferred := new(dns.Msg)
+		deferred.SetRcode(r, rcode)
+		rw.tapResponse(deferred)
+	}
+
+	return rcode, err
 }
 
 // Name implements the plugin.Plugin interface.
-func (h Dnstap) Name() string { return "dnstap" }
+func (h *Dnstap) Name() string { return "dnstap" }

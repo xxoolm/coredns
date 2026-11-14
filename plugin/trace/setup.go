@@ -2,8 +2,10 @@ package trace
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
@@ -24,6 +26,7 @@ func setup(c *caddy.Controller) error {
 	})
 
 	c.OnStartup(t.OnStartup)
+	c.OnShutdown(t.OnShutdown)
 
 	return nil
 }
@@ -35,8 +38,8 @@ func traceParse(c *caddy.Controller) (*trace, error) {
 	)
 
 	cfg := dnsserver.GetConfig(c)
-	if cfg.ListenHosts[0] != "" {
-		tr.serviceEndpoint = cfg.ListenHosts[0] + ":" + cfg.Port
+	if len(cfg.ListenHosts) > 0 && cfg.ListenHosts[0] != "" {
+		tr.serviceEndpoint = net.JoinHostPort(cfg.ListenHosts[0], cfg.Port)
 	}
 
 	for c.Next() { // trace
@@ -100,6 +103,35 @@ func traceParse(c *caddy.Controller) (*trace, error) {
 				if tr.datadogAnalyticsRate > 1 || tr.datadogAnalyticsRate < 0 {
 					return nil, fmt.Errorf("datadog analytics rate must be between 0 and 1, '%f' is not supported", tr.datadogAnalyticsRate)
 				}
+			case "zipkin_max_backlog_size":
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return nil, c.ArgErr()
+				}
+				tr.zipkinMaxBacklogSize, err = strconv.Atoi(args[0])
+				if err != nil {
+					return nil, err
+				}
+			case "zipkin_max_batch_size":
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return nil, c.ArgErr()
+				}
+				tr.zipkinMaxBatchSize, err = strconv.Atoi(args[0])
+				if err != nil {
+					return nil, err
+				}
+			case "zipkin_max_batch_interval":
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return nil, c.ArgErr()
+				}
+				tr.zipkinMaxBatchInterval, err = time.ParseDuration(args[0])
+				if err != nil {
+					return nil, err
+				}
+			default:
+				return nil, c.Errf("unknown property '%s'", c.Val())
 			}
 		}
 	}
@@ -116,7 +148,8 @@ func normalizeEndpoint(epType, ep string) (string, string, error) {
 	}
 
 	if epType == "zipkin" {
-		if !strings.Contains(ep, "http") {
+		lowerEp := strings.ToLower(ep)
+		if !strings.HasPrefix(lowerEp, "http://") && !strings.HasPrefix(lowerEp, "https://") {
 			ep = "http://" + ep + "/api/v2/spans"
 		}
 	}

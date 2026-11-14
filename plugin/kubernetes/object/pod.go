@@ -3,6 +3,8 @@ package object
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
 	api "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,9 +15,10 @@ import (
 type Pod struct {
 	// Don't add new fields to this struct without talking to the CoreDNS maintainers.
 	Version   string
-	PodIP     string
+	PodIPs    []string
 	Name      string
 	Namespace string
+	Labels    map[string]string
 
 	*Empty
 }
@@ -28,13 +31,18 @@ func ToPod(obj meta.Object) (meta.Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("unexpected object %v", obj)
 	}
+	podIPs := make([]string, len(apiPod.Status.PodIPs))
+	for i, pip := range apiPod.Status.PodIPs {
+		podIPs[i] = pip.IP
+	}
 	pod := &Pod{
 		Version:   apiPod.GetResourceVersion(),
-		PodIP:     apiPod.Status.PodIP,
+		PodIPs:    podIPs,
 		Namespace: apiPod.GetNamespace(),
 		Name:      apiPod.GetName(),
+		Labels:    apiPod.GetLabels(),
 	}
-	t := apiPod.ObjectMeta.DeletionTimestamp
+	t := apiPod.DeletionTimestamp
 	if t != nil && !(*t).Time.IsZero() {
 		// if the pod is in the process of termination, return an error so it can be ignored
 		// during add/update event processing
@@ -52,9 +60,11 @@ var _ runtime.Object = &Pod{}
 func (p *Pod) DeepCopyObject() runtime.Object {
 	p1 := &Pod{
 		Version:   p.Version,
-		PodIP:     p.PodIP,
+		PodIPs:    slices.Clone(p.PodIPs),
 		Namespace: p.Namespace,
 		Name:      p.Name,
+		// maps.Clone returns nil for a nil map, so an unlabelled pod stays unlabelled.
+		Labels: maps.Clone(p.Labels),
 	}
 	return p1
 }
@@ -63,16 +73,16 @@ func (p *Pod) DeepCopyObject() runtime.Object {
 func (p *Pod) GetNamespace() string { return p.Namespace }
 
 // SetNamespace implements the metav1.Object interface.
-func (p *Pod) SetNamespace(namespace string) {}
+func (p *Pod) SetNamespace(_namespace string) {}
 
 // GetName implements the metav1.Object interface.
 func (p *Pod) GetName() string { return p.Name }
 
 // SetName implements the metav1.Object interface.
-func (p *Pod) SetName(name string) {}
+func (p *Pod) SetName(_name string) {}
 
 // GetResourceVersion implements the metav1.Object interface.
 func (p *Pod) GetResourceVersion() string { return p.Version }
 
 // SetResourceVersion implements the metav1.Object interface.
-func (p *Pod) SetResourceVersion(version string) {}
+func (p *Pod) SetResourceVersion(_version string) {}

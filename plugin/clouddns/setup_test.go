@@ -2,6 +2,9 @@ package clouddns
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/coredns/caddy"
@@ -10,8 +13,28 @@ import (
 )
 
 func TestSetupCloudDNS(t *testing.T) {
-	f = func(ctx context.Context, opt option.ClientOption) (gcpDNS, error) {
+	f = func(_ctx context.Context, _opts ...option.ClientOption) (gcpDNS, error) {
 		return fakeGCPClient{}, nil
+	}
+
+	validCreds := filepath.Join(t.TempDir(), "valid_creds.json")
+	if err := os.WriteFile(validCreds, []byte(`{"type": "service_account"}`), 0644); err != nil {
+		t.Fatalf("Failed to create valid creds: %v", err)
+	}
+
+	invalidTypeCreds := filepath.Join(t.TempDir(), "invalid_type_creds.json")
+	if err := os.WriteFile(invalidTypeCreds, []byte(`{"type": "bad_type"}`), 0644); err != nil {
+		t.Fatalf("Failed to create invalid creds: %v", err)
+	}
+
+	emptyCreds := filepath.Join(t.TempDir(), "empty_creds.json")
+	if err := os.WriteFile(emptyCreds, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("Failed to create empty creds: %v", err)
+	}
+
+	invalidJSONCreds := filepath.Join(t.TempDir(), "invalid_json_creds.json")
+	if err := os.WriteFile(invalidJSONCreds, []byte(`{`), 0644); err != nil {
+		t.Fatalf("Failed to create invalid JSON creds: %v", err)
 	}
 
 	tests := []struct {
@@ -33,11 +56,47 @@ func TestSetupCloudDNS(t *testing.T) {
 		{`clouddns example.org.:example-project:zone-name {
     credentials
 }`, true},
+		{`clouddns example.org.:example-project:zone-name {
+    refresh 3m
+}`, false},
+		{`clouddns example.org.:example-project:zone-name {
+    refresh 30
+}`, false},
+		{`clouddns example.org.:example-project:zone-name {
+    refresh
+}`, true},
+		{`clouddns example.org.:example-project:zone-name {
+    refresh abc
+}`, true},
+		{`clouddns example.org.:example-project:zone-name {
+    refresh 0
+}`, true},
+		{`clouddns example.org.:example-project:zone-name {
+    refresh -5m
+}`, true},
+		{`clouddns example.org.:example-project:zone-name {
+    endpoint https://dns.googleapis.com
+}`, false},
+		{`clouddns example.org.:example-project:zone-name {
+    endpoint
+}`, true},
 		{`clouddns example.org.:example-project:zone-name example.org.:example-project:zone-name {
 	}`, true},
 
 		{`clouddns example.org {
 	}`, true},
+		{fmt.Sprintf(`clouddns example.org.:example-project:zone-name {
+    credentials %s
+}`, validCreds), false},
+		{fmt.Sprintf(`clouddns example.org.:example-project:zone-name {
+    credentials %s
+}`, invalidTypeCreds), true},
+		{fmt.Sprintf(`clouddns example.org.:example-project:zone-name {
+    credentials %s
+}`, emptyCreds), true},
+		{fmt.Sprintf(`clouddns example.org.:example-project:zone-name {
+    credentials %s
+}`, invalidJSONCreds), true},
 	}
 
 	for _, test := range tests {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/debug"
+	"github.com/coredns/coredns/plugin/pkg/fall"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
@@ -26,6 +27,7 @@ type GRPC struct {
 	tlsConfig     *tls.Config
 	tlsServerName string
 
+	Fall fall.F
 	Next plugin.Handler
 }
 
@@ -33,14 +35,18 @@ type GRPC struct {
 func (g *GRPC) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 	if !g.match(state) {
-		return plugin.NextOrFailure(g.Name(), g.Next, ctx, w, r)
+		if g.Next != nil {
+			return plugin.NextOrFailure(g.Name(), g.Next, ctx, w, r)
+		}
+		// No next plugin, return SERVFAIL
+		return dns.RcodeServerFailure, nil
 	}
 
 	var (
-		span, child      ot.Span
-		ret              *dns.Msg
-		upstreamErr, err error
-		i                int
+		span ot.Span
+		ret  *dns.Msg
+		err  error
+		i    int
 	)
 	span = ot.SpanFromContext(ctx)
 	list := g.list()
@@ -59,22 +65,25 @@ func (g *GRPC) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 		proxy := list[i]
 		i++
 
+		callCtx := ctx
+		var child ot.Span
 		if span != nil {
-			child = span.Tracer().StartSpan("query", ot.ChildOf(span.Context()))
-			ctx = ot.ContextWithSpan(ctx, child)
+			child, callCtx = ot.StartSpanFromContext(callCtx, "query")
 		}
 
-		ret, err = proxy.query(ctx, r)
-		if err != nil {
-			// Continue with the next proxy
-			continue
-		}
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithDeadline(callCtx, deadline)
+
+		ret, err = proxy.query(callCtx, r)
+		cancel()
 
 		if child != nil {
 			child.Finish()
 		}
-
-		upstreamErr = err
+		if err != nil {
+			// Continue with the next proxy
+			continue
+		}
 
 		// Check if the reply is correct; if not return FormErr.
 		if !state.Match(ret) {
@@ -86,12 +95,31 @@ func (g *GRPC) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 			return 0, nil
 		}
 
+		// Check if we should fallthrough on NXDOMAIN responses
+		if ret.Rcode == dns.RcodeNameError && g.Fall.Through(state.Name()) {
+			if g.Next != nil {
+				return plugin.NextOrFailure(g.Name(), g.Next, ctx, w, r)
+			}
+			// No next plugin to fallthrough to, return the NXDOMAIN response
+		}
+
 		w.WriteMsg(ret)
 		return 0, nil
 	}
 
-	if upstreamErr != nil {
-		return dns.RcodeServerFailure, upstreamErr
+	// SERVFAIL if all healthy proxys returned errors.
+	if err != nil {
+		// If fallthrough is enabled, try the next plugin instead of returning SERVFAIL
+		if g.Fall.Through(state.Name()) && g.Next != nil {
+			return plugin.NextOrFailure(g.Name(), g.Next, ctx, w, r)
+		}
+		// just return the last error received
+		return dns.RcodeServerFailure, err
+	}
+
+	// If fallthrough is enabled, try the next plugin instead of returning SERVFAIL
+	if g.Fall.Through(state.Name()) && g.Next != nil {
+		return plugin.NextOrFailure(g.Name(), g.Next, ctx, w, r)
 	}
 
 	return dns.RcodeServerFailure, ErrNoHealthy
@@ -110,6 +138,15 @@ func (g *GRPC) Name() string { return "grpc" }
 
 // Len returns the number of configured proxies.
 func (g *GRPC) len() int { return len(g.proxies) }
+
+// OnShutdown closes all configured upstream connections.
+func (g *GRPC) OnShutdown() error {
+	var err error
+	for _, p := range g.proxies {
+		err = errors.Join(err, p.close())
+	}
+	return err
+}
 
 func (g *GRPC) match(state request.Request) bool {
 	if !plugin.Name(g.from).Matches(state.Name()) || !g.isAllowedDomain(state.Name()) {

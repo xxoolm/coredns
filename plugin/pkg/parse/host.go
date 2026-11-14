@@ -32,13 +32,21 @@ func stripZone(host string) string {
 func HostPortOrFile(s ...string) ([]string, error) {
 	var servers []string
 	for _, h := range s {
-
 		trans, host := Transport(h)
+		if len(host) == 0 {
+			return servers, fmt.Errorf("invalid address: %q", h)
+		}
+
+		if trans == transport.UNIX {
+			servers = append(servers, trans+"://"+host)
+			continue
+		}
 
 		addr, _, err := net.SplitHostPort(host)
 
 		if err != nil {
 			// Parse didn't work, it is not a addr:port combo
+			host = strings.Trim(host, "[]")
 			hostNoZone := stripZone(host)
 			if net.ParseIP(hostNoZone) == nil {
 				ss, err := tryFile(host)
@@ -46,7 +54,7 @@ func HostPortOrFile(s ...string) ([]string, error) {
 					servers = append(servers, ss...)
 					continue
 				}
-				return servers, fmt.Errorf("not an IP address or file: %q", host)
+				return servers, fmt.Errorf("not an IP address or file %q: %w", host, err)
 			}
 			var ss string
 			switch trans {
@@ -54,6 +62,8 @@ func HostPortOrFile(s ...string) ([]string, error) {
 				ss = net.JoinHostPort(host, transport.Port)
 			case transport.TLS:
 				ss = transport.TLS + "://" + net.JoinHostPort(host, transport.TLSPort)
+			case transport.QUIC:
+				ss = transport.QUIC + "://" + net.JoinHostPort(host, transport.QUICPort)
 			case transport.GRPC:
 				ss = transport.GRPC + "://" + net.JoinHostPort(host, transport.GRPCPort)
 			case transport.HTTPS:
@@ -69,7 +79,7 @@ func HostPortOrFile(s ...string) ([]string, error) {
 				servers = append(servers, ss...)
 				continue
 			}
-			return servers, fmt.Errorf("not an IP address or file: %q", host)
+			return servers, fmt.Errorf("not an IP address or file %q: %w", host, err)
 		}
 		servers = append(servers, h)
 	}
@@ -82,15 +92,15 @@ func HostPortOrFile(s ...string) ([]string, error) {
 // Try to open this is a file first.
 func tryFile(s string) ([]string, error) {
 	c, err := dns.ClientConfigFromFile(s)
-	if err == os.ErrNotExist {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("failed to open file %q: %q", s, err)
 	} else if err != nil {
 		return nil, err
 	}
 
-	servers := []string{}
+	var servers []string
 	for _, s := range c.Servers {
-		servers = append(servers, net.JoinHostPort(s, c.Port))
+		servers = append(servers, net.JoinHostPort(stripZone(s), c.Port))
 	}
 	return servers, nil
 }
@@ -103,13 +113,13 @@ func HostPort(s, defaultPort string) (string, error) {
 		port = defaultPort
 	}
 	if err != nil {
-		if net.ParseIP(s) == nil {
+		if net.ParseIP(stripZone(s)) == nil {
 			return "", fmt.Errorf("must specify an IP address: `%s'", s)
 		}
 		return net.JoinHostPort(s, port), nil
 	}
 
-	if net.ParseIP(addr) == nil {
+	if net.ParseIP(stripZone(addr)) == nil {
 		return "", fmt.Errorf("must specify an IP address: `%s'", addr)
 	}
 	return net.JoinHostPort(addr, port), nil

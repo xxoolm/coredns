@@ -8,19 +8,23 @@
 
 With *prometheus* you export metrics from CoreDNS and any plugin that has them.
 The default location for the metrics is `localhost:9153`. The metrics path is fixed to `/metrics`.
-The following metrics are exported:
+
+In addition to the default Go metrics exported by the [Prometheus Go client](https://prometheus.io/docs/guides/go-application/),
+the following metrics are exported:
 
 * `coredns_build_info{version, revision, goversion}` - info about CoreDNS itself.
 * `coredns_panics_total{}` - total number of panics.
-* `coredns_dns_requests_total{server, zone, proto, family, type}` - total query count.
-* `coredns_dns_request_duration_seconds{server, zone, type}` - duration to process each query.
-* `coredns_dns_request_size_bytes{server, zone, proto}` - size of the request in bytes.
-* `coredns_dns_do_requests_total{server, zone}` -  queries that have the DO bit set
-* `coredns_dns_response_size_bytes{server, zone, proto}` - response size in bytes.
-* `coredns_dns_responses_total{server, zone, rcode, plugin}` - response per zone, rcode and plugin.
-* `coredns_plugin_enabled{server, zone, name}` - indicates whether a plugin is enabled on per server and zone basis.
+* `coredns_dns_requests_total{server, zone, view, proto, family, type}` - total query count.
+* `coredns_dns_request_duration_seconds{server, zone, view}` - duration to process each query.
+* `coredns_dns_request_size_bytes{server, zone, view, proto}` - size of the request in bytes. Uses the original size before any plugin rewrites.
+* `coredns_dns_do_requests_total{server, view, zone}` -  queries that have the DO bit set
+* `coredns_dns_response_size_bytes{server, zone, view, proto}` - response size in bytes.
+* `coredns_dns_responses_total{server, zone, view, rcode, plugin}` - response per zone, rcode and plugin.
+* `coredns_dns_https_responses_total{server, status}` - responses per server and http status code.
+* `coredns_dns_quic_responses_total{server, status}` - responses per server and QUIC application code.
+* `coredns_plugin_enabled{server, zone, view, name}` - indicates whether a plugin is enabled on per server, zone and view basis.
 
-Each counter has a label `zone` which is the zonename used for the request/response.
+Almost each counter has a label `zone` which is the zonename used for the request/response.
 
 Extra labels used are:
 
@@ -32,24 +36,45 @@ Extra labels used are:
 * `type` which holds the query type. It holds most common types (A, AAAA, MX, SOA, CNAME, PTR, TXT,
   NS, SRV, DS, DNSKEY, RRSIG, NSEC, NSEC3, HTTPS, IXFR, AXFR and ANY) and "other" which lumps together all
   other types.
+* `status` which holds the https status code. Possible values are:
+  * 200 - request is processed,
+  * 404 - request has been rejected on validation,
+  * 400 - request to dns message conversion failed,
+  * 500 - processing ended up with no response.
 * the `plugin` label holds the name of the plugin that made the write to the client. If the server
   did the write (on error for instance), the value is empty.
 
 If monitoring is enabled, queries that do not enter the plugin chain are exported under the fake
 name "dropped" (without a closing dot - this is never a valid domain name).
 
+Other plugins may export additional stats when the _prometheus_ plugin is enabled.  Those stats are documented in each
+plugin's README.
+
 This plugin can only be used once per Server Block.
 
 ## Syntax
 
 ~~~
-prometheus [ADDRESS]
+prometheus [ADDRESS] {
+    runtime_metrics
+    tls CONFIG_FILE
+}
 ~~~
 
 For each zone that you want to see metrics for.
 
 It optionally takes a bind address to which the metrics are exported; the default
 listens on `localhost:9153`. The metrics path is fixed to `/metrics`.
+
+* `runtime_metrics` exports the full Go [runtime/metrics](https://pkg.go.dev/runtime/metrics)
+  set — notably `go_cpu_classes_*` for CPU attribution (GC mark/assist/pause vs user code)
+  and `go_sched_latencies_seconds` for goroutine scheduling delay. Adds roughly 100 scalars
+  and 8 histograms. This is a process-wide latch: enabling it in any server block enables it
+  for all, and it stays enabled across reloads until restart.
+* `tls` serves `/metrics` over HTTPS. **CONFIG_FILE** is a Prometheus
+  [web configuration file](https://prometheus.io/docs/prometheus/latest/configuration/https/)
+  whose `tls_server_config` section sets `cert_file`, `key_file` and, optionally,
+  `client_auth_type` and `client_ca_file` for mutual TLS.
 
 ## Examples
 
@@ -68,6 +93,24 @@ then:
 . {
     prometheus localhost:{$PORT}
 }
+~~~
+
+Serve the metrics over HTTPS:
+
+~~~ corefile
+. {
+    prometheus {
+        tls /etc/coredns/web-config.yml
+    }
+}
+~~~
+
+With `/etc/coredns/web-config.yml`:
+
+~~~ yaml
+tls_server_config:
+  cert_file: server.crt
+  key_file: server.key
 ~~~
 
 ## Bugs

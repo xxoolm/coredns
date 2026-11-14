@@ -37,7 +37,7 @@ func TestErraticDrop(t *testing.T) {
 		if err != tc.expectedErr {
 			t.Errorf("Test %d: Expected error %q, but got %q", i, tc.expectedErr, err)
 		}
-		if code != int(tc.expectedCode) {
+		if code != tc.expectedCode {
 			t.Errorf("Test %d: Expected status code %d, but got %d", i, tc.expectedCode, code)
 		}
 
@@ -71,12 +71,33 @@ func TestErraticTruncate(t *testing.T) {
 		if err != tc.expectedErr {
 			t.Errorf("Test %d: Expected error %q, but got %q", i, tc.expectedErr, err)
 		}
-		if code != int(tc.expectedCode) {
+		if code != tc.expectedCode {
 			t.Errorf("Test %d: Expected status code %d, but got %d", i, tc.expectedCode, code)
 		}
 
 		if tc.truncate && !rec.Msg.Truncated {
 			t.Errorf("Test %d: Expected truncated message, but got %q", i, rec.Msg.Question[0].Name)
+		}
+	}
+}
+
+func TestErraticTruncateThree(t *testing.T) {
+	e := &Erratic{truncate: 3} // 1 per 3 queries
+
+	ctx := context.TODO()
+
+	for i := range 6 {
+		req := new(dns.Msg)
+		req.SetQuestion("example.org.", dns.TypeA)
+
+		rec := dnstest.NewRecorder(&test.ResponseWriter{})
+		if _, err := e.ServeDNS(ctx, rec, req); err != nil {
+			t.Fatalf("Test %d: Expected no error, but got %q", i, err)
+		}
+
+		want := i%3 == 0
+		if rec.Msg.Truncated != want {
+			t.Errorf("Test %d: Truncated = %t, want %t", i, rec.Msg.Truncated, want)
 		}
 	}
 }

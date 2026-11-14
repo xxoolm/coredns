@@ -1,6 +1,8 @@
 package template
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/coredns/caddy"
@@ -24,7 +26,6 @@ func TestSetup(t *testing.T) {
 }
 
 func TestSetupParse(t *testing.T) {
-
 	serverBlockKeys := []string{"domain.com.:8053", "dynamic.domain.com.:8053"}
 
 	tests := []struct {
@@ -84,6 +85,20 @@ func TestSetupParse(t *testing.T) {
 			}`,
 			true,
 		},
+		{
+			`template ANY ANY {
+				answer "{{ notAFunction }}"
+			}`,
+			true,
+		},
+		{
+			`template ANY ANY {
+				answer "{{ parseInt }}"
+				additional "{{ parseInt }}"
+				authority "{{ parseInt }}"
+			}`,
+			false,
+		},
 		// examples
 		{`template ANY ANY (?P<x>`, false},
 		{
@@ -130,6 +145,13 @@ func TestSetupParse(t *testing.T) {
 			false,
 		},
 		{
+			`template IN A example {
+				match ^ip0a(?P<b>[a-f0-9]{2})(?P<c>[a-f0-9]{2})(?P<d>[a-f0-9]{2})[.]example[.]$
+				answer "{{ .Name }} 3600 IN A 10.{{ parseInt .Group.b 16 8 }}.{{ parseInt .Group.c 16 8 }}.{{ parseInt .Group.d 16 8 }}"
+			}`,
+			false,
+		},
+		{
 			`template IN MX example {
 					match ^ip-10-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]$
 					answer "{{ .Name }} 60 IN MX 10 {{ .Name }}"
@@ -140,6 +162,30 @@ func TestSetupParse(t *testing.T) {
 					additional "ns1.example. 60 IN A 198.51.100.8"
 				}`,
 			false,
+		},
+		{
+			`template ANY ANY invalid {
+					rcode NXDOMAIN
+					authority "invalid. 60 {{ .Class }} SOA ns.invalid. hostmaster.invalid. (1 60 60 60 60)"
+					ederror 21 "Blocked according to RFC2606"
+			  	}`,
+			false,
+		},
+		{
+			`template ANY ANY invalid {
+					rcode NXDOMAIN
+					authority "invalid. 60 {{ .Class }} SOA ns.invalid. hostmaster.invalid. (1 60 60 60 60)"
+					ederror invalid "Blocked according to RFC2606"
+			  	}`,
+			true,
+		},
+		{
+			`template ANY ANY invalid {
+					rcode NXDOMAIN
+					authority "invalid. 60 {{ .Class }} SOA ns.invalid. hostmaster.invalid. (1 60 60 60 60)"
+					ederror too many arguments
+			  	}`,
+			true,
 		},
 	}
 	for i, test := range tests {
@@ -152,5 +198,254 @@ func TestSetupParse(t *testing.T) {
 		} else if err != nil && !test.shouldErr {
 			t.Fatalf("Test %d expected no errors, but got '%v'", i, err)
 		}
+	}
+}
+
+func TestSetupParseVar(t *testing.T) {
+	tests := []struct {
+		inputFileRules string
+		shouldErr      bool
+		varCount       int
+	}{
+		{
+			`template ANY ANY example. {
+				var a 1
+			}`,
+			false, 1,
+		},
+		{
+			`template ANY ANY example. {
+				var a 1
+				var b a + 1
+				var c 'x' + name()
+			}`,
+			false, 3,
+		},
+		{
+			`template ANY ANY example. {
+				match ^(?P<a>[a-z]+)[.]example[.]$
+				var a group("a") + group(1) + group(0)
+			}`,
+			false, 1,
+		},
+		{
+			`template ANY ANY example. {
+				var
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var 1a 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a-b 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var name 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var group 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var len 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var true 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var let 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a 1 +
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a invalid expression
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a b + 1
+				var b 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a undefined
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a 1
+				var a 2
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a 1
+				var b a + 1
+				var c 'x' + b
+			}`,
+			true, 0,
+		},
+	}
+	for i, test := range tests {
+		c := caddy.NewTestController("dns", test.inputFileRules)
+		handler, err := templateParse(c)
+
+		if err == nil && test.shouldErr {
+			t.Errorf("Test %d expected errors, but got no error\n---\n%s\n---", i, test.inputFileRules)
+			continue
+		}
+		if err != nil {
+			if !test.shouldErr {
+				t.Errorf("Test %d expected no errors, but got '%v'", i, err)
+			}
+			continue
+		}
+		if got := len(handler.Templates[0].vars); got != test.varCount {
+			t.Errorf("Test %d expected %d vars, but got %d", i, test.varCount, got)
+		}
+	}
+}
+
+func TestSetupParseExpr(t *testing.T) {
+	tests := []struct {
+		inputFileRules string
+		shouldErr      bool
+		exprCount      int
+	}{
+		{
+			`template ANY ANY example. {
+				expr name() == 'a.example.'
+			}`,
+			false, 1,
+		},
+		{
+			`template ANY ANY example. {
+				expr name() == 'a.example.'
+				expr incidr(client_ip(), '10.0.0.0/8')
+			}`,
+			false, 2,
+		},
+		{
+			`template ANY ANY example. {
+				var a 1
+				expr a == 1
+			}`,
+			false, 1,
+		},
+		{
+			`template ANY ANY example. {
+				match ^(?P<a>[a-z]+)[.]example[.]$
+				expr group('a') != ''
+			}`,
+			false, 1,
+		},
+		{
+			`template ANY ANY example. {
+				expr 1
+			}`,
+			false, 1,
+		},
+		{
+			`template ANY ANY example. {
+				expr
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				expr name() ==
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				expr invalid expression
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				expr undefined == 1
+			}`,
+			true, 0,
+		},
+		{
+			`template ANY ANY example. {
+				var a 1
+				expr a + 'x'
+			}`,
+			true, 0,
+		},
+	}
+	for i, test := range tests {
+		c := caddy.NewTestController("dns", test.inputFileRules)
+		handler, err := templateParse(c)
+
+		if err == nil && test.shouldErr {
+			t.Errorf("Test %d expected errors, but got no error\n---\n%s\n---", i, test.inputFileRules)
+			continue
+		}
+		if err != nil {
+			if !test.shouldErr {
+				t.Errorf("Test %d expected no errors, but got '%v'", i, err)
+			}
+			continue
+		}
+		if got := len(handler.Templates[0].exprs); got != test.exprCount {
+			t.Errorf("Test %d expected %d exprs, but got %d", i, test.exprCount, got)
+		}
+	}
+}
+
+func TestSetupParseLargeRegex(t *testing.T) {
+	largeRegex := strings.Repeat("a", maxRegexpLen+1)
+	config := fmt.Sprintf(`template ANY A example.com {
+		match %s
+	}`, largeRegex)
+
+	c := caddy.NewTestController("dns", config)
+	_, err := templateParse(c)
+	if err == nil {
+		t.Fatal("Expected error for large regex, got nil")
+	}
+	if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("Expected 'too long' error, got: %v", err)
 	}
 }

@@ -5,24 +5,41 @@ import (
 	"math"
 
 	"github.com/coredns/coredns/plugin/etcd/msg"
+	"github.com/coredns/coredns/plugin/pkg/dnsutil"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
 )
 
-func (e *External) a(ctx context.Context, services []msg.Service, state request.Request) (records []dns.RR) {
+func (e *External) a(ctx context.Context, services []msg.Service, state request.Request) (records []dns.RR, truncated bool) {
 	dup := make(map[string]struct{})
+	qname := ""
 
 	for _, s := range services {
-
 		what, ip := s.HostType()
 
 		switch what {
 		case dns.TypeCNAME:
+			// One chase per distinct target: every lookup re-enters the plugin
+			// chain, and a headless Service can list the same name many times.
+			target := dns.CanonicalName(s.Host)
+			if qname == "" {
+				qname = dns.CanonicalName(state.Name())
+			}
+			if target == qname {
+				continue
+			}
+			if _, ok := dup[target]; ok {
+				continue
+			}
+			dup[target] = struct{}{}
 			rr := s.NewCNAME(state.QName(), s.Host)
 			records = append(records, rr)
-			if resp, err := e.upstream.Lookup(ctx, state, dns.Fqdn(s.Host), dns.TypeA); err == nil {
+			if resp, err := e.upstream.Lookup(ctx, state, dns.Fqdn(s.Host), dns.TypeA); err == nil && resp != nil {
 				records = append(records, resp.Answer...)
+				if resp.Truncated {
+					truncated = true
+				}
 			}
 
 		case dns.TypeA:
@@ -37,22 +54,36 @@ func (e *External) a(ctx context.Context, services []msg.Service, state request.
 			// nada
 		}
 	}
-	return records
+	return records, truncated
 }
 
-func (e *External) aaaa(ctx context.Context, services []msg.Service, state request.Request) (records []dns.RR) {
+func (e *External) aaaa(ctx context.Context, services []msg.Service, state request.Request) (records []dns.RR, truncated bool) {
 	dup := make(map[string]struct{})
+	qname := ""
 
 	for _, s := range services {
-
 		what, ip := s.HostType()
 
 		switch what {
 		case dns.TypeCNAME:
+			target := dns.CanonicalName(s.Host)
+			if qname == "" {
+				qname = dns.CanonicalName(state.Name())
+			}
+			if target == qname {
+				continue
+			}
+			if _, ok := dup[target]; ok {
+				continue
+			}
+			dup[target] = struct{}{}
 			rr := s.NewCNAME(state.QName(), s.Host)
 			records = append(records, rr)
-			if resp, err := e.upstream.Lookup(ctx, state, dns.Fqdn(s.Host), dns.TypeAAAA); err == nil {
+			if resp, err := e.upstream.Lookup(ctx, state, dns.Fqdn(s.Host), dns.TypeAAAA); err == nil && resp != nil {
 				records = append(records, resp.Answer...)
+				if resp.Truncated {
+					truncated = true
+				}
 			}
 
 		case dns.TypeA:
@@ -65,6 +96,19 @@ func (e *External) aaaa(ctx context.Context, services []msg.Service, state reque
 				rr.Hdr.Ttl = e.ttl
 				records = append(records, rr)
 			}
+		}
+	}
+	return records, truncated
+}
+
+func (e *External) ptr(services []msg.Service, state request.Request) (records []dns.RR) {
+	dup := make(map[string]struct{})
+	for _, s := range services {
+		if _, ok := dup[s.Host]; !ok {
+			dup[s.Host] = struct{}{}
+			rr := s.NewPTR(state.QName(), dnsutil.Join(s.Host, e.Zones[0]))
+			rr.Hdr.Ttl = e.ttl
+			records = append(records, rr)
 		}
 	}
 	return records
@@ -107,7 +151,6 @@ func (e *External) srv(ctx context.Context, services []msg.Service, state reques
 		what, ip := s.HostType()
 
 		switch what {
-
 		case dns.TypeCNAME:
 			addr := dns.Fqdn(s.Host)
 			srv := s.NewSRV(state.QName(), weight)
@@ -115,10 +158,10 @@ func (e *External) srv(ctx context.Context, services []msg.Service, state reques
 				records = append(records, srv)
 			}
 			if ok := isDuplicate(dup, srv.Target, addr, 0); !ok {
-				if resp, err := e.upstream.Lookup(ctx, state, addr, dns.TypeA); err == nil {
+				if resp, err := e.upstream.Lookup(ctx, state, addr, dns.TypeA); err == nil && resp != nil {
 					extra = append(extra, resp.Answer...)
 				}
-				if resp, err := e.upstream.Lookup(ctx, state, addr, dns.TypeAAAA); err == nil {
+				if resp, err := e.upstream.Lookup(ctx, state, addr, dns.TypeAAAA); err == nil && resp != nil {
 					extra = append(extra, resp.Answer...)
 				}
 			}

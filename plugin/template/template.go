@@ -10,10 +10,12 @@ import (
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/plugin/metrics"
+	"github.com/coredns/coredns/plugin/pkg/expression"
 	"github.com/coredns/coredns/plugin/pkg/fall"
-	"github.com/coredns/coredns/plugin/pkg/upstream"
 	"github.com/coredns/coredns/request"
 
+	"github.com/expr-lang/expr"
+	"github.com/expr-lang/expr/vm"
 	"github.com/miekg/dns"
 )
 
@@ -34,8 +36,26 @@ type template struct {
 	authority  []*gotmpl.Template
 	qclass     uint16
 	qtype      uint16
+	ederror    *ederror
 	fall       fall.F
-	upstream   *upstream.Upstream
+	upstream   Upstreamer
+	vars       []variable
+	exprs      []*vm.Program
+}
+
+type variable struct {
+	name string
+	prog *vm.Program
+}
+
+type ederror struct {
+	code   uint16
+	reason string
+}
+
+// Upstreamer looks up targets of CNAME templates
+type Upstreamer interface {
+	Lookup(ctx context.Context, state request.Request, name string, typ uint16) (*dns.Msg, error)
 }
 
 type templateData struct {
@@ -49,6 +69,7 @@ type templateData struct {
 	Message  *dns.Msg
 	Question *dns.Question
 	Remote   string
+	Var      map[string]any
 	md       map[string]metadata.Func
 }
 
@@ -64,12 +85,25 @@ func (data *templateData) Meta(metaName string) string {
 	return ""
 }
 
+func exprEnv(ctx context.Context, state *request.Request, data *templateData) map[string]any {
+	env := expression.DefaultEnv(ctx, state)
+	env["group"] = func(name any) string {
+		switch n := name.(type) {
+		case int:
+			return data.Group[strconv.Itoa(n)]
+		case string:
+			return data.Group[n]
+		}
+		return ""
+	}
+	return env
+}
+
 // ServeDNS implements the plugin.Handler interface.
 func (h Handler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 
-	zone := plugin.Zones(h.Zones).Matches(state.Name())
-	if zone == "" {
+	if !plugin.Zones(h.Zones).Contains(state.Name()) {
 		return plugin.NextOrFailure(h.Name(), h.Next, ctx, w, r)
 	}
 
@@ -77,12 +111,12 @@ func (h Handler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 		data, match, fthrough := template.match(ctx, state)
 		if !match {
 			if !fthrough {
-				return dns.RcodeNameError, nil
+				return dns.RcodeServerFailure, nil
 			}
 			continue
 		}
 
-		templateMatchesCount.WithLabelValues(metrics.WithServer(ctx), data.Zone, data.Class, data.Type).Inc()
+		templateMatchesCount.WithLabelValues(metrics.WithServer(ctx), data.Zone, metrics.WithView(ctx), data.Class, data.Type).Inc()
 
 		if template.rcode == dns.RcodeServerFailure {
 			return template.rcode, nil
@@ -94,29 +128,37 @@ func (h Handler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 		msg.Rcode = template.rcode
 
 		for _, answer := range template.answer {
-			rr, err := executeRRTemplate(metrics.WithServer(ctx), "answer", answer, data)
+			rr, err := executeRRTemplate(metrics.WithServer(ctx), metrics.WithView(ctx), "answer", answer, data)
 			if err != nil {
 				return dns.RcodeServerFailure, err
 			}
 			msg.Answer = append(msg.Answer, rr)
 			if template.upstream != nil && (state.QType() == dns.TypeA || state.QType() == dns.TypeAAAA) && rr.Header().Rrtype == dns.TypeCNAME {
-				up, _ := template.upstream.Lookup(ctx, state, rr.(*dns.CNAME).Target, state.QType())
-				msg.Answer = append(msg.Answer, up.Answer...)
+				if up, err := template.upstream.Lookup(ctx, state, rr.(*dns.CNAME).Target, state.QType()); err == nil && up != nil {
+					msg.Truncated = up.Truncated
+					msg.Answer = append(msg.Answer, up.Answer...)
+				}
 			}
 		}
 		for _, additional := range template.additional {
-			rr, err := executeRRTemplate(metrics.WithServer(ctx), "additional", additional, data)
+			rr, err := executeRRTemplate(metrics.WithServer(ctx), metrics.WithView(ctx), "additional", additional, data)
 			if err != nil {
 				return dns.RcodeServerFailure, err
 			}
 			msg.Extra = append(msg.Extra, rr)
 		}
 		for _, authority := range template.authority {
-			rr, err := executeRRTemplate(metrics.WithServer(ctx), "authority", authority, data)
+			rr, err := executeRRTemplate(metrics.WithServer(ctx), metrics.WithView(ctx), "authority", authority, data)
 			if err != nil {
 				return dns.RcodeServerFailure, err
 			}
 			msg.Ns = append(msg.Ns, rr)
+		}
+
+		if template.ederror != nil {
+			msg = msg.SetEdns0(4096, true)
+			ede := dns.EDNS0_EDE{InfoCode: template.ederror.code, ExtraText: template.ederror.reason}
+			msg.IsEdns0().Option = append(msg.IsEdns0().Option, &ede)
 		}
 
 		w.WriteMsg(msg)
@@ -129,19 +171,26 @@ func (h Handler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 // Name implements the plugin.Handler interface.
 func (h Handler) Name() string { return "template" }
 
-func executeRRTemplate(server, section string, template *gotmpl.Template, data *templateData) (dns.RR, error) {
+func executeRRTemplate(server, view, section string, template *gotmpl.Template, data *templateData) (dns.RR, error) {
 	buffer := &bytes.Buffer{}
 	err := template.Execute(buffer, data)
 	if err != nil {
-		templateFailureCount.WithLabelValues(server, data.Zone, data.Class, data.Type, section, template.Tree.Root.String()).Inc()
+		templateFailureCount.WithLabelValues(server, data.Zone, view, data.Class, data.Type, section, template.Tree.Root.String()).Inc()
 		return nil, err
 	}
 	rr, err := dns.NewRR(buffer.String())
 	if err != nil {
-		templateRRFailureCount.WithLabelValues(server, data.Zone, data.Class, data.Type, section, template.Tree.Root.String()).Inc()
+		templateRRFailureCount.WithLabelValues(server, data.Zone, view, data.Class, data.Type, section, template.Tree.Root.String()).Inc()
 		return rr, err
 	}
 	return rr, nil
+}
+
+func newTemplate(name, text string) (*gotmpl.Template, error) {
+	funcMap := gotmpl.FuncMap{
+		"parseInt": strconv.ParseUint,
+	}
+	return gotmpl.New(name).Funcs(funcMap).Parse(text)
 }
 
 func (t template) match(ctx context.Context, state request.Request) (*templateData, bool, bool) {
@@ -192,6 +241,30 @@ func (t template) match(ctx context.Context, state request.Request) (*templateDa
 		for i, m := range matches {
 			if len(groupNames[i]) > 0 {
 				data.Group[groupNames[i]] = m
+			}
+		}
+
+		if len(t.vars) > 0 || len(t.exprs) > 0 {
+			exprState := state // &state would escape unconditionally
+			env := exprEnv(ctx, &exprState, data)
+			data.Var = make(map[string]any)
+			for _, v := range t.vars {
+				result, err := expr.Run(v.prog, env)
+				if err != nil {
+					return data, false, false
+				}
+				env[v.name] = result
+				data.Var[v.name] = result
+			}
+
+			for _, prog := range t.exprs {
+				result, err := expr.Run(prog, env)
+				if err != nil {
+					return data, false, false
+				}
+				if b, ok := result.(bool); !ok || !b {
+					return data, false, t.fall.Through(state.Name())
+				}
 			}
 		}
 

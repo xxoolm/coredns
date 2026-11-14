@@ -18,7 +18,7 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("erratic", err)
 	}
 
-	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
+	dnsserver.GetConfig(c).AddPlugin(func(_next plugin.Handler) plugin.Handler {
 		return e
 	})
 
@@ -33,6 +33,7 @@ func parseErratic(c *caddy.Controller) (*Erratic, error) {
 		for c.NextBlock() {
 			switch c.Val() {
 			case "drop":
+				drop = true
 				args := c.RemainingArgs()
 				if len(args) > 1 {
 					return nil, c.ArgErr()
@@ -50,7 +51,6 @@ func parseErratic(c *caddy.Controller) (*Erratic, error) {
 					return nil, fmt.Errorf("illegal amount value given %q", args[0])
 				}
 				e.drop = uint64(amount)
-				drop = true
 			case "delay":
 				args := c.RemainingArgs()
 				if len(args) > 2 {
@@ -86,6 +86,8 @@ func parseErratic(c *caddy.Controller) (*Erratic, error) {
 					return nil, c.ArgErr()
 				}
 
+				// Defaults.
+				e.truncate = 2
 				if len(args) == 0 {
 					continue
 				}

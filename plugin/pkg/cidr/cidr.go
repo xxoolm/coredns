@@ -38,7 +38,7 @@ func Split(n *net.IPNet) []string {
 func nets(network *net.IPNet, newPrefixLen int) []*net.IPNet {
 	prefixLen, _ := network.Mask.Size()
 	maxSubnets := int(math.Exp2(float64(newPrefixLen)) / math.Exp2(float64(prefixLen)))
-	nets := []*net.IPNet{{network.IP, net.CIDRMask(newPrefixLen, 8*len(network.IP))}}
+	nets := []*net.IPNet{{IP: network.IP, Mask: net.CIDRMask(newPrefixLen, 8*len(network.IP))}}
 
 	for i := 1; i < maxSubnets; i++ {
 		next, exceeds := cidr.NextSubnet(nets[len(nets)-1], newPrefixLen)
@@ -71,7 +71,7 @@ func Reverse(nets []string) []string {
 		nearest := (bits - ones) + mod
 		offset := 0
 		var end bool
-		for i := 0; i < nearest/sizeDigit; i++ {
+		for range nearest / sizeDigit {
 			offset, end = dns.NextLabel(r, offset)
 			if end {
 				break

@@ -12,6 +12,7 @@ import (
 type ResponseWriter struct {
 	TCP      bool // if TCP is true we return an TCP connection instead of an UDP one.
 	RemoteIP string
+	Zone     string
 }
 
 // LocalAddr returns the local address, 127.0.0.1:53 (UDP, TCP if t.TCP is true).
@@ -33,13 +34,16 @@ func (t *ResponseWriter) RemoteAddr() net.Addr {
 	ip := net.ParseIP(remoteIP)
 	port := 40212
 	if t.TCP {
-		return &net.TCPAddr{IP: ip, Port: port, Zone: ""}
+		return &net.TCPAddr{IP: ip, Port: port, Zone: t.Zone}
 	}
-	return &net.UDPAddr{IP: ip, Port: port, Zone: ""}
+	return &net.UDPAddr{IP: ip, Port: port, Zone: t.Zone}
 }
 
+// Network implements dns.ResponseWriter interface.
+func (t *ResponseWriter) Network() string { return "" }
+
 // WriteMsg implements dns.ResponseWriter interface.
-func (t *ResponseWriter) WriteMsg(m *dns.Msg) error { return nil }
+func (t *ResponseWriter) WriteMsg(_m *dns.Msg) error { return nil }
 
 // Write implements dns.ResponseWriter interface.
 func (t *ResponseWriter) Write(buf []byte) (int, error) { return len(buf), nil }

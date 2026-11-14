@@ -14,33 +14,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package test will scrape a target and you can inspect the variables.
+// Package test contains helper functions for writing plugin tests.
+// For example to scrape a target and inspect the variables.
 // Basic usage:
 //
 //	result := Scrape("http://localhost:9153/metrics")
 //	v := MetricValue("coredns_cache_capacity", result)
-//
 package test
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"strconv"
 
-	"github.com/matttproud/golang_protobuf_extensions/pbutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+	"google.golang.org/protobuf/encoding/protodelim"
 )
 
 type (
 	// MetricFamily holds a prometheus metric.
 	MetricFamily struct {
-		Name    string        `json:"name"`
-		Help    string        `json:"help"`
-		Type    string        `json:"type"`
-		Metrics []interface{} `json:"metrics,omitempty"` // Either metric or summary.
+		Name    string `json:"name"`
+		Help    string `json:"help"`
+		Type    string `json:"type"`
+		Metrics []any  `json:"metrics,omitempty"` // Either metric or summary.
 	}
 
 	// metric is for all "single value" metrics.
@@ -80,7 +82,6 @@ func Scrape(url string) []*MetricFamily {
 // ScrapeMetricAsInt provides a sum of all metrics collected for the name and label provided.
 // if the metric is not a numeric value, it will be counted a 0.
 func ScrapeMetricAsInt(addr string, name string, label string, nometricvalue int) int {
-
 	valueToInt := func(m metric) int {
 		v := m.Value
 		r, err := strconv.Atoi(v)
@@ -141,7 +142,6 @@ func MetricValueLabel(name, label string, mfs []*MetricFamily) (string, map[stri
 						return m.(metric).Value, m.(metric).Labels
 					}
 				}
-
 			}
 		}
 	}
@@ -153,21 +153,21 @@ func newMetricFamily(dtoMF *dto.MetricFamily) *MetricFamily {
 		Name:    dtoMF.GetName(),
 		Help:    dtoMF.GetHelp(),
 		Type:    dtoMF.GetType().String(),
-		Metrics: make([]interface{}, len(dtoMF.Metric)),
+		Metrics: make([]any, len(dtoMF.GetMetric())),
 	}
-	for i, m := range dtoMF.Metric {
+	for i, m := range dtoMF.GetMetric() {
 		if dtoMF.GetType() == dto.MetricType_SUMMARY {
 			mf.Metrics[i] = summary{
 				Labels:    makeLabels(m),
 				Quantiles: makeQuantiles(m),
-				Count:     fmt.Sprint(m.GetSummary().GetSampleCount()),
+				Count:     strconv.FormatUint(m.GetSummary().GetSampleCount(), 10),
 				Sum:       fmt.Sprint(m.GetSummary().GetSampleSum()),
 			}
 		} else if dtoMF.GetType() == dto.MetricType_HISTOGRAM {
 			mf.Metrics[i] = histogram{
 				Labels:  makeLabels(m),
 				Buckets: makeBuckets(m),
-				Count:   fmt.Sprint(m.GetHistogram().GetSampleCount()),
+				Count:   strconv.FormatUint(m.GetHistogram().GetSampleCount(), 10),
 				Sum:     fmt.Sprint(m.GetSummary().GetSampleSum()),
 			}
 		} else {
@@ -181,13 +181,13 @@ func newMetricFamily(dtoMF *dto.MetricFamily) *MetricFamily {
 }
 
 func value(m *dto.Metric) float64 {
-	if m.Gauge != nil {
+	if m.GetGauge() != nil {
 		return m.GetGauge().GetValue()
 	}
-	if m.Counter != nil {
+	if m.GetCounter() != nil {
 		return m.GetCounter().GetValue()
 	}
-	if m.Untyped != nil {
+	if m.GetUntyped() != nil {
 		return m.GetUntyped().GetValue()
 	}
 	return 0.
@@ -195,7 +195,7 @@ func value(m *dto.Metric) float64 {
 
 func makeLabels(m *dto.Metric) map[string]string {
 	result := map[string]string{}
-	for _, lp := range m.Label {
+	for _, lp := range m.GetLabel() {
 		result[lp.GetName()] = lp.GetValue()
 	}
 	return result
@@ -203,7 +203,7 @@ func makeLabels(m *dto.Metric) map[string]string {
 
 func makeQuantiles(m *dto.Metric) map[string]string {
 	result := map[string]string{}
-	for _, q := range m.GetSummary().Quantile {
+	for _, q := range m.GetSummary().GetQuantile() {
 		result[fmt.Sprint(q.GetQuantile())] = fmt.Sprint(q.GetValue())
 	}
 	return result
@@ -211,15 +211,15 @@ func makeQuantiles(m *dto.Metric) map[string]string {
 
 func makeBuckets(m *dto.Metric) map[string]string {
 	result := map[string]string{}
-	for _, b := range m.GetHistogram().Bucket {
-		result[fmt.Sprint(b.GetUpperBound())] = fmt.Sprint(b.GetCumulativeCount())
+	for _, b := range m.GetHistogram().GetBucket() {
+		result[fmt.Sprint(b.GetUpperBound())] = strconv.FormatUint(b.GetCumulativeCount(), 10)
 	}
 	return result
 }
 
 func fetchMetricFamilies(url string, ch chan<- *dto.MetricFamily) {
 	defer close(ch)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return
 	}
@@ -237,9 +237,10 @@ func fetchMetricFamilies(url string, ch chan<- *dto.MetricFamily) {
 	if err == nil && mediatype == "application/vnd.google.protobuf" &&
 		params["encoding"] == "delimited" &&
 		params["proto"] == "io.prometheus.client.MetricFamily" {
+		reader := bufio.NewReader(resp.Body)
 		for {
 			mf := &dto.MetricFamily{}
-			if _, err = pbutil.ReadDelimited(resp.Body, mf); err != nil {
+			if err = protodelim.UnmarshalFrom(reader, mf); err != nil {
 				if err == io.EOF {
 					break
 				}
@@ -251,7 +252,7 @@ func fetchMetricFamilies(url string, ch chan<- *dto.MetricFamily) {
 		// We could do further content-type checks here, but the
 		// fallback for now will anyway be the text format
 		// version 0.0.4, so just go for it and see if it works.
-		var parser expfmt.TextParser
+		parser := expfmt.NewTextParser(model.LegacyValidation)
 		metricFamilies, err := parser.TextToMetricFamilies(resp.Body)
 		if err != nil {
 			return

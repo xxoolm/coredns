@@ -18,12 +18,14 @@ var log = clog.NewWithPlugin("transfer")
 type Transfer struct {
 	Transferers []Transferer // List of plugins that implement Transferer
 	xfrs        []*xfr
+	tsigSecret  map[string]string
 	Next        plugin.Handler
 }
 
 type xfr struct {
-	Zones []string
-	to    []string
+	Zones  []string
+	to     []string
+	source net.IP
 }
 
 // Transferer may be implemented by plugins to enable zone transfers
@@ -35,7 +37,7 @@ type Transferer interface {
 	//
 	// If serial is 0, handle as an AXFR request. Transfer should send all records
 	// in the zone to the channel. The SOA should be written to the channel first, followed
-	// by all other records, including all NS + glue records. The implemenation is also responsible
+	// by all other records, including all NS + glue records. The implementation is also responsible
 	// for sending the last SOA record (to signal end of the transfer). This plugin will just grab
 	// these records and send them back to the requester, there is little validation done.
 	//
@@ -62,7 +64,7 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		return dns.RcodeRefused, nil
 	}
 
-	x := longestMatch(t.xfrs, state.QName())
+	x := longestMatch(t.xfrs, state.Name())
 	if x == nil {
 		return plugin.NextOrFailure(t.Name(), t.Next, ctx, w, r)
 	}
@@ -92,7 +94,7 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	var pchan <-chan []dns.RR
 	var err error
 	for _, p := range t.Transferers {
-		pchan, err = p.Transfer(state.QName(), serial)
+		pchan, err = p.Transfer(state.Name(), serial)
 		if err == ErrNotAuthoritative {
 			// plugin was not authoritative for the zone, try next plugin
 			continue
@@ -110,6 +112,9 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	// Send response to client
 	ch := make(chan *dns.Envelope)
 	tr := new(dns.Transfer)
+	if r.IsTsig() != nil {
+		tr.TsigSecret = t.tsigSecret
+	}
 	errCh := make(chan error)
 	go func() {
 		if err := tr.Out(w, r, ch); err != nil {
@@ -120,20 +125,36 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 
 	rrs := []dns.RR{}
 	l := 0
+	batchSize := 0
 	var soa *dns.SOA
 	for records := range pchan {
+		if len(records) == 0 {
+			continue
+		}
 		if x, ok := records[0].(*dns.SOA); ok && soa == nil {
 			soa = x
 		}
-		rrs = append(rrs, records...)
-		if len(rrs) > 500 {
-			select {
-			case ch <- &dns.Envelope{RR: rrs}:
-			case err := <-errCh:
-				return dns.RcodeServerFailure, err
+		for _, rr := range records {
+			rrLen := dns.Len(rr)
+			// Flush the batch before it exceeds the 64KB TCP message limit.
+			// The 12-byte header and question section are not counted in rrLen,
+			// so we use a conservative threshold to leave room for framing.
+			if len(rrs) > 0 && batchSize+rrLen > 63000 {
+				select {
+				case ch <- &dns.Envelope{RR: rrs}:
+				case err := <-errCh:
+					go func() {
+						for range pchan {
+						}
+					}()
+					return dns.RcodeServerFailure, err
+				}
+				l += len(rrs)
+				rrs = []dns.RR{}
+				batchSize = 0
 			}
-			l += len(rrs)
-			rrs = []dns.RR{}
+			rrs = append(rrs, rr)
+			batchSize += rrLen
 		}
 	}
 
@@ -160,10 +181,10 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 		select {
 		case ch <- &dns.Envelope{RR: rrs}:
 		case err := <-errCh:
+			close(ch)
 			return dns.RcodeServerFailure, err
 		}
 		l += len(rrs)
-
 	}
 
 	close(ch)     // Even though we close the channel here, we still have
@@ -205,7 +226,7 @@ func longestMatch(xfrs []*xfr, name string) *xfr {
 	zone := "" // longest zone match wins
 	for _, xfr := range xfrs {
 		if z := plugin.Zones(xfr.Zones).Matches(name); z != "" {
-			if z > zone {
+			if len(z) > len(zone) || (len(z) == len(zone) && z > zone) {
 				zone = z
 				x = xfr
 			}

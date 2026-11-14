@@ -2,6 +2,7 @@ package file
 
 import (
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/coredns/coredns/plugin/transfer"
@@ -19,13 +20,31 @@ func (z *Zone) Reload(t *transfer.Transfer) error {
 			select {
 			case <-tick.C:
 				zFile := z.File()
-				reader, err := os.Open(zFile)
+				serial := z.SOASerialIfDefined()
+				var fileMtime time.Time
+
+				if z.ReloadByMtime {
+					fi, err := os.Stat(zFile)
+					if err != nil {
+						log.Errorf("Failed to stat zone %q in %q: %v", z.origin, zFile, err)
+						continue
+					}
+					z.RLock()
+					lastMtime := z.file_mtime
+					z.RUnlock()
+					if !fi.ModTime().After(lastMtime) {
+						continue
+					}
+					fileMtime = fi.ModTime()
+					serial = 0 // force reload of the zone
+				}
+
+				reader, err := os.Open(filepath.Clean(zFile))
 				if err != nil {
 					log.Errorf("Failed to open zone %q in %q: %v", z.origin, zFile, err)
 					continue
 				}
 
-				serial := z.SOASerialIfDefined()
 				zone, err := Parse(reader, z.origin, zFile, serial)
 				reader.Close()
 				if err != nil {
@@ -35,13 +54,14 @@ func (z *Zone) Reload(t *transfer.Transfer) error {
 					continue
 				}
 
-				// copy elements we need
-				z.Lock()
-				z.Apex = zone.Apex
-				z.Tree = zone.Tree
-				z.Unlock()
+				z.setData(zone.Apex, zone.Tree)
+				if z.ReloadByMtime {
+					z.Lock()
+					z.file_mtime = fileMtime
+					z.Unlock()
+				}
 
-				log.Infof("Successfully reloaded zone %q in %q with %d SOA serial", z.origin, zFile, z.Apex.SOA.Serial)
+				log.Infof("Successfully reloaded zone %q in %q with %d SOA serial", z.origin, zFile, zone.SOA.Serial)
 				if t != nil {
 					if err := t.Notify(z.origin); err != nil {
 						log.Warningf("Failed sending notifies: %s", err)
@@ -61,8 +81,8 @@ func (z *Zone) Reload(t *transfer.Transfer) error {
 func (z *Zone) SOASerialIfDefined() int64 {
 	z.RLock()
 	defer z.RUnlock()
-	if z.Apex.SOA != nil {
-		return int64(z.Apex.SOA.Serial)
+	if z.SOA != nil {
+		return int64(z.SOA.Serial)
 	}
 	return -1
 }

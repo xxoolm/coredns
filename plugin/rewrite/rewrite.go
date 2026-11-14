@@ -23,9 +23,9 @@ const (
 
 // These are defined processing mode.
 const (
-	// Processing should stop after completing this rule
+	// Stop processing should stop after completing this rule
 	Stop = "stop"
-	// Processing should continue to next rule
+	// Continue processing should continue to next rule
 	Continue = "continue"
 )
 
@@ -54,17 +54,31 @@ func (rw Rewrite) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			}
 			wr.ResponseRules = append(wr.ResponseRules, respRules...)
 			if rule.Mode() == Stop {
-				if !rw.RevertPolicy.DoRevert() {
+				if !rw.DoRevert() {
 					return plugin.NextOrFailure(rw.Name(), rw.Next, ctx, w, r)
 				}
-				return plugin.NextOrFailure(rw.Name(), rw.Next, ctx, wr, r)
+				return rw.serveWithResponseReverter(ctx, wr, r, state)
 			}
 		}
 	}
-	if !rw.RevertPolicy.DoRevert() || len(wr.ResponseRules) == 0 {
+	if !rw.DoRevert() || len(wr.ResponseRules) == 0 {
 		return plugin.NextOrFailure(rw.Name(), rw.Next, ctx, w, r)
 	}
-	return plugin.NextOrFailure(rw.Name(), rw.Next, ctx, wr, r)
+	return rw.serveWithResponseReverter(ctx, wr, r, state)
+}
+
+func (rw Rewrite) serveWithResponseReverter(ctx context.Context, wr *ResponseReverter, r *dns.Msg, state request.Request) (int, error) {
+	rcode, err := plugin.NextOrFailure(rw.Name(), rw.Next, ctx, wr, r)
+	if plugin.ClientWrite(rcode) {
+		return rcode, err
+	}
+	// The next plugins didn't write a response, so write one now with the ResponseReverter.
+	// If server.ServeDNS does this then it will bypass response rewrite rules.
+	res := new(dns.Msg).SetRcode(r, rcode)
+	state.SizeAndDo(res)
+	wr.WriteMsg(res)
+	// Return success so server does not write a second error response to the client.
+	return dns.RcodeSuccess, err
 }
 
 // Name implements the Handler interface.
@@ -90,10 +104,16 @@ func newRule(args ...string) (Rule, error) {
 	switch arg0 {
 	case Continue:
 		mode = Continue
+		if len(args) < 2 {
+			return nil, fmt.Errorf("continue rule must begin with a rule type")
+		}
 		ruleType = strings.ToLower(args[1])
 		expectNumArgs = len(args) - 1
 		startArg = 2
 	case Stop:
+		if len(args) < 2 {
+			return nil, fmt.Errorf("stop rule must begin with a rule type")
+		}
 		ruleType = strings.ToLower(args[1])
 		expectNumArgs = len(args) - 1
 		startArg = 2
@@ -123,6 +143,10 @@ func newRule(args ...string) (Rule, error) {
 		return newEdns0Rule(mode, args[startArg:]...)
 	case "ttl":
 		return newTTLRule(mode, args[startArg:]...)
+	case "cname":
+		return newCNAMERule(mode, args[startArg:]...)
+	case "rcode":
+		return newRCodeRule(mode, args[startArg:]...)
 	default:
 		return nil, fmt.Errorf("invalid rule type %q", args[0])
 	}

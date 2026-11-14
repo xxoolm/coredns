@@ -1,85 +1,246 @@
 name: Go Tests
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+permissions:
+  contents: read
+
 jobs:
+  test-capabilities:
+    name: Test Linux capabilities (cgo=${{ matrix.cgo }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        cgo: ['0', '1']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: .go-version
+      - name: Build capability tests
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/capabilities"
+          go build -o "$RUNNER_TEMP/capabilities/coredns" .
+          race=()
+          if [ "$CGO_ENABLED" = 1 ]; then race=(-race); fi
+          go test "${race[@]}" -c -o "$RUNNER_TEMP/capabilities/reuseport.test" ./plugin/pkg/reuseport
+      - name: Test permitted capabilities and CoreDNS behavior
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          findmnt -T /tmp -o TARGET,OPTIONS
+          caps=$(sed -n 's/^RUN setcap \(.*\) \/coredns/\1/p' Dockerfile)
+          sudo unshare --mount --net sh -ec '
+            # File capabilities must be honored regardless of the runner mount options.
+            # Both the mount and network changes are confined to this namespace.
+            mount --make-rprivate /
+            mount -t tmpfs -o mode=1777 tmpfs /tmp
+            install -m 755 "$1/reuseport.test" /tmp/reuseport.test
+            setcap cap_net_bind_service=p /tmp/reuseport.test
+            getcap /tmp/reuseport.test
+            ip link set lo up
+            sysctl -qw net.ipv4.ip_unprivileged_port_start=1024
+            setpriv --reuid=65532 --regid=65532 --clear-groups \
+              --bounding-set=-all,+net_bind_service --inh-caps=-all --ambient-caps=-all \
+              env COREDNS_TEST_BIND_CAPABILITY=1 /tmp/reuseport.test -test.v -test.run TestListenWith
+            python3 "$2" --binary "$1/coredns" --caps "$3" --label "$4"
+          ' sh "$RUNNER_TEMP/capabilities" "$PWD/.github/test-capabilities.py" "$caps" "cgo=$CGO_ENABLED"
+      - name: Test container startup and DNS queries
+        if: matrix.cgo == '0'
+        run: |
+          docker build -f Dockerfile -t coredns-capabilities "$RUNNER_TEMP/capabilities"
+          docker run --rm --cap-drop=ALL coredns-capabilities -version
+          docker run --rm --cap-drop=ALL coredns-capabilities -plugins
+          python3 .github/test-capabilities.py --image coredns-capabilities --label docker
+
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
-    - name: Install Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: '1.17.0'
-      id: go
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: .go-version
+        id: go
 
-    - name: Check out code
-      uses: actions/checkout@v2
+      - name: Build
+        run: go build -v ./...
 
-    - name: Build
-      run: go build -v ./...
+      - name: Test
+        run: |
+          ( cd request; go test -race ./... )
+          ( cd core; go test -race  ./... )
+          ( cd coremain; go test -race ./... )
 
-    - name: Test
-      run: |
-        ( cd request; go test -race ./... )
-        ( cd core; go test -race  ./... )
-        ( cd coremain; go test -race ./... )
+      - name: Build manual-registration mode
+        run: go build -tags=coredns_manual_registration ./...
+
+      - name: Test manual-registration mode
+        run: go test -race -tags=coredns_manual_registration ./core/dnsserver ./coremain
+
+  test-windows:
+    name: Test Windows
+    runs-on: windows-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: .go-version
+        id: go
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        shell: bash
+        run: |
+          ( cd request; go test -race ./... )
+          ( cd core; go test -race  ./... )
+          ( cd coremain; go test -race ./... )
+
+      - name: Build manual-registration mode
+        run: go build -tags=coredns_manual_registration ./...
+
+      - name: Test manual-registration mode
+        run: go test -race -tags=coredns_manual_registration ./core/dnsserver ./coremain
+
+      - name: Test UDP destination views
+        run: go test -race ./test -run '^TestViewServerIP'
 
   test-plugins:
     name: Test Plugins
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
-    - name: Install Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: '1.17.0'
-      id: go
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: .go-version
+        id: go
 
-    - name: Check out code
-      uses: actions/checkout@v2
+      - name: Build
+        run: go build -v ./...
 
-    - name: Build
-      run: go build -v ./...
+      - name: Test
+        shell: bash
+        run: ( cd plugin; go test -race ./... )
 
-    - name: Test
-      run: ( cd plugin; go test -race ./... )
+  test-udp-macos:
+    name: Test UDP macOS
+    runs-on: macos-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: .go-version
+
+      - name: Add a second loopback address
+        run: sudo ifconfig lo0 alias 127.0.0.2
+
+      - name: Test UDP destination addresses
+        run: |
+          go test -race ./core/dnsserver ./plugin/pkg/proxyproto ./request
+          go test -race ./test -run '^TestViewServerIP'
 
   test-e2e:
     name: Test e2e
     runs-on: ubuntu-latest
     steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
-    - name: Install Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: '1.17.0'
-      id: go
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: .go-version
+        id: go
 
-    - name: Check out code
-      uses: actions/checkout@v2
+      - name: Build
+        run: go build -v ./...
 
-    - name: Build
-      run: go build -v ./...
+      - name: Install clients for DDNS interoperability tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bind9-dnsutils kea-dhcp-ddns-server
+          nsupdate -V
+          kea-dhcp-ddns -v
+          # Keep the distribution AppArmor profile and use its allowed paths.
+          sudo systemctl stop kea-dhcp-ddns-server
+          # The package may restrict /etc/kea to its service user/group. Allow
+          # traversal to the test directory, which remains private with mode 0700.
+          sudo chmod o+x /etc/kea
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /etc/kea/coredns-tests
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /run/kea
+          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" /dev/null /run/kea/logger_lockfile
+          test ! -e /run/kea/kea-dhcp-ddns.kea-dhcp-ddns.pid
 
-    - name: Test
-      run: |
-        go install github.com/fatih/faillint || true
-        ( cd test; go test -race ./... )
+      - name: Test
+        env:
+          COREDNS_KEA_CONFIG_DIR: /etc/kea/coredns-tests
+          KEA_PIDFILE_DIR: /run/kea
+          KEA_LOCKFILE_DIR: /run/kea
+        run: |
+          ( cd test; go test -race ./... )
 
   test-makefile-release:
     name: Test Makefile.release
     runs-on: ubuntu-latest
     steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get install make curl
+      - name: Install dependencies
+        run: sudo apt-get install make curl
 
-    - name: Check out code
-      uses: actions/checkout@v2
+      - name: Test Makefile.release release
+        run: make GITHUB_ACCESS_TOKEN=x release -f Makefile.release
 
-    - name: Test Makefile.release
-      run:  make GITHUB_ACCESS_TOKEN=x -n release github-push -f Makefile.release
+      - name: Test Makefile.release release/github-push (dry-run)
+        run: make GITHUB_ACCESS_TOKEN=x -n release github-push -f Makefile.release
 
-    - name: Test Makefile.docker
-      run:  make VERSION=x DOCKER=x -n release docker-push -f Makefile.docker
+      - name: Test Makefile.docker release/github-push (dry-run)
+        run: make VERSION=x DOCKER=x -n release docker-push -f Makefile.docker
+
+      - name: Prepare Docker build
+        run: |
+          for arch in amd64 arm arm64 mips64le ppc64le s390x riscv64 loong64; do
+            mkdir -p build/docker/$arch
+            cp build/linux/$arch/coredns build/docker/$arch/
+          done
+
+      - name: Test Makefile.docker build
+        run: make VERSION=x DOCKER=x -f Makefile.docker docker-build

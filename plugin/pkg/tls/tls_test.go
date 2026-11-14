@@ -1,14 +1,16 @@
 package tls
 
 import (
+	"crypto/tls"
 	"path/filepath"
 	"testing"
 
 	"github.com/coredns/coredns/plugin/test"
 )
 
-func getPEMFiles(t *testing.T) (rmFunc func(), cert, key, ca string) {
-	tempDir, rmFunc, err := test.WritePEMFiles("")
+func getPEMFiles(t *testing.T) (cert, key, ca string) {
+	t.Helper()
+	tempDir, err := test.WritePEMFiles(t)
 	if err != nil {
 		t.Fatalf("Could not write PEM files: %s", err)
 	}
@@ -20,39 +22,55 @@ func getPEMFiles(t *testing.T) (rmFunc func(), cert, key, ca string) {
 	return
 }
 
-func TestNewTLSConfig(t *testing.T) {
-	rmFunc, cert, key, ca := getPEMFiles(t)
-	defer rmFunc()
+func assertTLSDefaults(t *testing.T, c *tls.Config) {
+	t.Helper()
+	if c.MinVersion != tls.VersionTLS12 {
+		t.Errorf("MinVersion = %d, want %d", c.MinVersion, tls.VersionTLS12)
+	}
+	if c.MaxVersion != 0 {
+		t.Errorf("MaxVersion = %d, want 0 to use Go defaults", c.MaxVersion)
+	}
+	if c.CipherSuites != nil {
+		t.Errorf("CipherSuites = %v, want nil to use Go defaults", c.CipherSuites)
+	}
+	if c.CurvePreferences != nil {
+		t.Errorf("CurvePreferences = %v, want nil to use Go defaults", c.CurvePreferences)
+	}
+}
 
-	_, err := NewTLSConfig(cert, key, ca)
+func TestNewTLSConfig(t *testing.T) {
+	cert, key, ca := getPEMFiles(t)
+	c, err := NewTLSConfig(cert, key, ca)
 	if err != nil {
 		t.Errorf("Failed to create TLSConfig: %s", err)
 	}
+	assertTLSDefaults(t, c)
 }
 
 func TestNewTLSClientConfig(t *testing.T) {
-	rmFunc, _, _, ca := getPEMFiles(t)
-	defer rmFunc()
+	_, _, ca := getPEMFiles(t)
 
-	_, err := NewTLSClientConfig(ca)
+	c, err := NewTLSClientConfig(ca)
 	if err != nil {
 		t.Errorf("Failed to create TLSConfig: %s", err)
 	}
+	assertTLSDefaults(t, c)
 }
 
 func TestNewTLSConfigFromArgs(t *testing.T) {
-	rmFunc, cert, key, ca := getPEMFiles(t)
-	defer rmFunc()
+	cert, key, ca := getPEMFiles(t)
 
-	_, err := NewTLSConfigFromArgs()
+	c, err := NewTLSConfigFromArgs()
 	if err != nil {
 		t.Errorf("Failed to create TLSConfig: %s", err)
 	}
+	assertTLSDefaults(t, c)
 
-	c, err := NewTLSConfigFromArgs(ca)
+	c, err = NewTLSConfigFromArgs(ca)
 	if err != nil {
 		t.Errorf("Failed to create TLSConfig: %s", err)
 	}
+	assertTLSDefaults(t, c)
 	if c.RootCAs == nil {
 		t.Error("RootCAs should not be nil when one arg passed")
 	}
@@ -61,6 +79,7 @@ func TestNewTLSConfigFromArgs(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to create TLSConfig: %s", err)
 	}
+	assertTLSDefaults(t, c)
 	if c.RootCAs != nil {
 		t.Error("RootCAs should be nil when two args passed")
 	}
@@ -72,6 +91,31 @@ func TestNewTLSConfigFromArgs(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to create TLSConfig: %s", err)
 	}
+	assertTLSDefaults(t, c)
+	if c.RootCAs == nil {
+		t.Error("RootCAs should not be nil when three args passed")
+	}
+	if len(c.Certificates) != 1 {
+		t.Error("Certificates should have a single entry when three args passed")
+	}
+}
+
+func TestNewTLSConfigFromArgsWithRoot(t *testing.T) {
+	cert, key, ca := getPEMFiles(t)
+	tempDir := t.TempDir()
+
+	root := tempDir
+	args := []string{cert, key, ca}
+	for i := range args {
+		if !filepath.IsAbs(args[i]) && root != "" {
+			args[i] = filepath.Join(root, args[i])
+		}
+	}
+	c, err := NewTLSConfigFromArgs(args...)
+	if err != nil {
+		t.Errorf("Failed to create TLSConfig: %s", err)
+	}
+	assertTLSDefaults(t, c)
 	if c.RootCAs == nil {
 		t.Error("RootCAs should not be nil when three args passed")
 	}
@@ -81,8 +125,7 @@ func TestNewTLSConfigFromArgs(t *testing.T) {
 }
 
 func TestNewHTTPSTransport(t *testing.T) {
-	rmFunc, _, _, ca := getPEMFiles(t)
-	defer rmFunc()
+	_, _, ca := getPEMFiles(t)
 
 	cc, err := NewTLSClientConfig(ca)
 	if err != nil {

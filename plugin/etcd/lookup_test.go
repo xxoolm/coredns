@@ -1,4 +1,4 @@
-// +build etcd
+//go:build etcd
 
 package etcd
 
@@ -28,7 +28,8 @@ var services = []*msg.Service{
 	{Host: "10.0.0.2", Port: 8080, Key: "b.server1.prod.region1.skydns.test."},
 	{Host: "::1", Port: 8080, Key: "b.server6.prod.region1.skydns.test."},
 	// TXT record in server1.
-	{Host: "", Port: 8080, Text: "sometext", Key: "txt.server1.prod.region1.skydns.test."},
+	{Text: "sometext", Key: "a.txt.server1.prod.region1.skydns.test."},
+	{Text: "moretext", Key: "b.txt.server1.prod.region1.skydns.test."},
 	// Unresolvable internal name.
 	{Host: "unresolvable.skydns.test", Key: "cname.prod.region1.skydns.test."},
 	// Priority.
@@ -145,6 +146,7 @@ var dnsTestCases = []test.Case{
 	{
 		Qname: "txt.server1.prod.region1.skydns.test.", Qtype: dns.TypeTXT,
 		Answer: []dns.RR{
+			test.TXT("txt.server1.prod.region1.skydns.test. 303 IN TXT moretext"),
 			test.TXT("txt.server1.prod.region1.skydns.test. 303 IN TXT sometext"),
 		},
 	},
@@ -337,7 +339,7 @@ func TestLookup(t *testing.T) {
 		defer delete(t, etc, serv.Key)
 	}
 
-	for _, tc := range dnsTestCases {
+	for i, tc := range dnsTestCases {
 		m := tc.Msg()
 
 		rec := dnstest.NewRecorder(&test.ResponseWriter{})
@@ -345,8 +347,50 @@ func TestLookup(t *testing.T) {
 
 		resp := rec.Msg
 		if err := test.SortAndCheck(resp, tc); err != nil {
-			t.Error(err)
+			t.Errorf("Test %d: %v", i, err)
 		}
+	}
+}
+
+func TestLookupNoApexFallback(t *testing.T) {
+	etc := newEtcdPlugin()
+	etc.Zones = []string{"strict.test."}
+
+	child := &msg.Service{Host: "10.0.0.1", Key: "x.child.strict.test."}
+	set(t, etc, child.Key, 0, child)
+	defer delete(t, etc, child.Key)
+
+	query := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("strict.test.", dns.TypeA)
+		rec := dnstest.NewRecorder(&test.ResponseWriter{})
+		if _, err := etc.ServeDNS(ctxt, rec, m); err != nil {
+			t.Fatalf("unexpected lookup error: %v", err)
+		}
+		return rec.Msg
+	}
+
+	legacy := query()
+	if legacy.Rcode != dns.RcodeSuccess || len(legacy.Answer) != 1 {
+		t.Fatalf("legacy fallback returned rcode %s with %d answers", dns.RcodeToString[legacy.Rcode], len(legacy.Answer))
+	}
+
+	etc.NoApexFallback = true
+	strict := query()
+	if strict.Rcode != dns.RcodeNameError || len(strict.Answer) != 0 {
+		t.Fatalf("disabled fallback returned rcode %s with %d answers", dns.RcodeToString[strict.Rcode], len(strict.Answer))
+	}
+
+	apex := &msg.Service{Host: "192.0.2.1", Key: "x.apex.dns.strict.test."}
+	set(t, etc, apex.Key, 0, apex)
+	defer delete(t, etc, apex.Key)
+
+	strictWithApex := query()
+	if strictWithApex.Rcode != dns.RcodeSuccess || len(strictWithApex.Answer) != 1 {
+		t.Fatalf("dedicated apex lookup returned rcode %s with %d answers", dns.RcodeToString[strictWithApex.Rcode], len(strictWithApex.Answer))
+	}
+	if got := strictWithApex.Answer[0].String(); got != "strict.test.\t300\tIN\tA\t192.0.2.1" {
+		t.Fatalf("unexpected apex answer: %s", got)
 	}
 }
 

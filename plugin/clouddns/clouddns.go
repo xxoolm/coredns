@@ -28,6 +28,7 @@ type CloudDNS struct {
 	zoneNames []string
 	client    gcpDNS
 	upstream  *upstream.Upstream
+	refresh   time.Duration
 
 	zMu   sync.RWMutex
 	zones zones
@@ -46,8 +47,9 @@ type zones map[string][]*zone
 // string of project name and hosted zone name lists as its values, validates
 // that each domain name/zone id pair does exist, and returns a new *CloudDNS.
 // In addition to this, upstream is passed for doing recursive queries against CNAMEs.
+// refresh sets how often the zones are refreshed from Cloud DNS.
 // Returns error if it cannot verify any given domain name/zone id pair.
-func New(ctx context.Context, c gcpDNS, keys map[string][]string, up *upstream.Upstream) (*CloudDNS, error) {
+func New(_ctx context.Context, c gcpDNS, keys map[string][]string, up *upstream.Upstream, refresh time.Duration) (*CloudDNS, error) {
 	zones := make(map[string][]*zone, len(keys))
 	zoneNames := make([]string, 0, len(keys))
 	for dnsName, hostedZoneDetails := range keys {
@@ -72,6 +74,7 @@ func New(ctx context.Context, c gcpDNS, keys map[string][]string, up *upstream.U
 		zoneNames: zoneNames,
 		zones:     zones,
 		upstream:  up,
+		refresh:   refresh,
 	}, nil
 }
 
@@ -82,12 +85,15 @@ func (h *CloudDNS) Run(ctx context.Context) error {
 		return err
 	}
 	go func() {
+		timer := time.NewTimer(h.refresh)
+		defer timer.Stop()
 		for {
+			timer.Reset(h.refresh)
 			select {
 			case <-ctx.Done():
 				log.Debugf("Breaking out of CloudDNS update loop for %v: %v", h.zoneNames, ctx.Err())
 				return
-			case <-time.After(1 * time.Minute):
+			case <-timer.C:
 				if err := h.updateZones(ctx); err != nil && ctx.Err() == nil /* Don't log error if ctx expired. */ {
 					log.Errorf("Failed to update zones %v: %v", h.zoneNames, err)
 				}
@@ -157,16 +163,18 @@ func updateZoneFromRRS(rrs *gcp.ResourceRecordSetsListResponse, z *file.Zone) er
 			if rr.Type == "CNAME" || rr.Type == "PTR" {
 				value = dns.Fqdn(value)
 			}
-
 			// Assemble RFC 1035 conforming record to pass into dns scanner.
 			rfc1035 = fmt.Sprintf("%s %d IN %s %s", dns.Fqdn(rr.Name), rr.Ttl, rr.Type, value)
 			r, err = dns.NewRR(rfc1035)
 			if err != nil {
 				return fmt.Errorf("failed to parse resource record: %v", err)
 			}
-		}
 
-		z.Insert(r)
+			err = z.Insert(r)
+			if err != nil {
+				return fmt.Errorf("failed to insert record: %v", err)
+			}
+		}
 	}
 	return nil
 }
@@ -200,13 +208,12 @@ func (h *CloudDNS) updateZones(ctx context.Context) error {
 				(*z[i]).z = newZ
 				h.zMu.Unlock()
 			}
-
 		}(zName, z)
 	}
 	// Collect errors (if any). This will also sync on all zones updates
 	// completion.
 	var errs []string
-	for i := 0; i < len(h.zones); i++ {
+	for range len(h.zones) {
 		err := <-errc
 		if err != nil {
 			errs = append(errs, err.Error())

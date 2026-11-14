@@ -6,13 +6,10 @@ import (
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
-	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 )
 
 const pluginName = "dns64"
-
-var log = clog.NewWithPlugin(pluginName)
 
 func init() { plugin.Register(pluginName, setup) }
 
@@ -87,7 +84,9 @@ func parsePrefix(c *caddy.Controller, addr string) (*net.IPNet, error) {
 	if total != 128 {
 		return nil, c.Errf("invalid netmask %d IPv6 address: %q", total, pref)
 	}
-	if n%8 != 0 || n < 32 || n > 96 {
+	switch n {
+	case 32, 40, 48, 56, 64, 96:
+	default:
 		return nil, c.Errf("invalid prefix length %q", pref)
 	}
 

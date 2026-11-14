@@ -1,6 +1,9 @@
 package rewrite
 
 import (
+	"fmt"
+	"slices"
+
 	"github.com/miekg/dns"
 )
 
@@ -41,7 +44,20 @@ func NewRevertPolicy(noRevert, noRestore bool) RevertPolicy {
 
 // ResponseRule contains a rule to rewrite a response with.
 type ResponseRule interface {
-	RewriteResponse(rr dns.RR)
+	RewriteResponse(res *dns.Msg, rr dns.RR)
+}
+
+type requestExtraRevertRule interface {
+	ResponseRule
+	revertRequestExtra()
+}
+
+// msgResponseRule is a ResponseRule that rewrites message-level fields, which
+// are independent of any resource record (for example the RCODE). Such a rule
+// must still be applied when the response carries no records.
+type msgResponseRule interface {
+	ResponseRule
+	rewriteMsg()
 }
 
 // ResponseRules describes an ordered list of response rules to apply
@@ -54,6 +70,7 @@ type ResponseRules = []ResponseRule
 type ResponseReverter struct {
 	dns.ResponseWriter
 	originalQuestion dns.Question
+	request          *dns.Msg
 	ResponseRules    ResponseRules
 	revertPolicy     RevertPolicy
 }
@@ -63,17 +80,25 @@ func NewResponseReverter(w dns.ResponseWriter, r *dns.Msg, policy RevertPolicy) 
 	return &ResponseReverter{
 		ResponseWriter:   w,
 		originalQuestion: r.Question[0],
+		request:          r,
 		revertPolicy:     policy,
 	}
 }
 
 // WriteMsg records the status code and calls the underlying ResponseWriter's WriteMsg method.
 func (r *ResponseReverter) WriteMsg(res1 *dns.Msg) error {
+	if res1 == nil {
+		return fmt.Errorf("rewrite: response message is nil")
+	}
 	// Deep copy 'res' as to not (e.g). rewrite a message that's also stored in the cache.
 	res := res1.Copy()
 
 	if r.revertPolicy.DoQuestionRestore() {
-		res.Question[0] = r.originalQuestion
+		if len(res.Question) == 0 {
+			res.Question = []dns.Question{r.originalQuestion}
+		} else {
+			res.Question[0] = r.originalQuestion
+		}
 	}
 	if len(r.ResponseRules) > 0 {
 		for _, rr := range res.Ns {
@@ -85,13 +110,84 @@ func (r *ResponseReverter) WriteMsg(res1 *dns.Msg) error {
 		for _, rr := range res.Extra {
 			r.rewriteResourceRecord(res, rr)
 		}
+		// Message-level response rules (e.g. rcode) rewrite header fields that
+		// are independent of any resource record. The per-record loops above
+		// never run them when the response carries no records (e.g. a bare
+		// SERVFAIL from a downstream plugin), so apply them once here.
+		if len(res.Ns) == 0 && len(res.Answer) == 0 && len(res.Extra) == 0 {
+			r.rewriteMsg(res)
+		}
 	}
+	return r.writeWithRevertedRequestExtra(res)
+}
+
+func (r *ResponseReverter) writeWithRevertedRequestExtra(res *dns.Msg) error {
+	if r.request == nil || !r.hasRequestExtraRevertRule() {
+		return r.ResponseWriter.WriteMsg(res)
+	}
+
+	currentExtra := r.request.Extra
+	req := new(dns.Msg)
+	req.Extra = copyRRs(currentExtra)
+	for _, rr := range req.Extra {
+		r.rewriteRequestExtra(req, rr)
+	}
+	r.request.Extra = req.Extra
+	defer func() {
+		r.request.Extra = currentExtra
+	}()
+
 	return r.ResponseWriter.WriteMsg(res)
 }
 
-func (r *ResponseReverter) rewriteResourceRecord(res *dns.Msg, rr dns.RR) {
+func (r *ResponseReverter) hasRequestExtraRevertRule() bool {
 	for _, rule := range r.ResponseRules {
-		rule.RewriteResponse(rr)
+		if _, ok := rule.(requestExtraRevertRule); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func copyRRs(rrs []dns.RR) []dns.RR {
+	if len(rrs) == 0 {
+		return nil
+	}
+	copied := make([]dns.RR, len(rrs))
+	for i, rr := range rrs {
+		copied[i] = dns.Copy(rr)
+	}
+	return copied
+}
+
+func (r *ResponseReverter) rewriteResourceRecord(res *dns.Msg, rr dns.RR) {
+	// The reverting rules need to be done in reversed order.
+	for _, v := range slices.Backward(r.ResponseRules) {
+		v.RewriteResponse(res, rr)
+	}
+}
+
+// rewriteMsg applies the message-level response rules once, in reversed order.
+// It is used for responses that carry no resource records, where the per-record
+// loops in WriteMsg would otherwise never apply them.
+func (r *ResponseReverter) rewriteMsg(res *dns.Msg) {
+	// The reverting rules need to be done in reversed order.
+	for _, v := range slices.Backward(r.ResponseRules) {
+		if _, ok := v.(msgResponseRule); !ok {
+			continue
+		}
+		v.RewriteResponse(res, nil)
+	}
+}
+
+func (r *ResponseReverter) rewriteRequestExtra(req *dns.Msg, rr dns.RR) {
+	// The reverting rules need to be done in reversed order.
+	for _, v := range slices.Backward(r.ResponseRules) {
+		rule, ok := v.(requestExtraRevertRule)
+		if !ok {
+			continue
+		}
+		rule.RewriteResponse(req, rr)
 	}
 }
 
@@ -117,6 +213,8 @@ func getRecordValueForRewrite(rr dns.RR) (name string) {
 		return rr.(*dns.NAPTR).Replacement
 	case dns.TypeSOA:
 		return rr.(*dns.SOA).Ns
+	case dns.TypePTR:
+		return rr.(*dns.PTR).Ptr
 	default:
 		return ""
 	}
@@ -138,5 +236,7 @@ func setRewrittenRecordValue(rr dns.RR, value string) {
 		rr.(*dns.NAPTR).Replacement = value
 	case dns.TypeSOA:
 		rr.(*dns.SOA).Ns = value
+	case dns.TypePTR:
+		rr.(*dns.PTR).Ptr = value
 	}
 }

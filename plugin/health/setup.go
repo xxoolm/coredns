@@ -17,10 +17,10 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("health", err)
 	}
 
-	h := &health{Addr: addr, stop: make(chan bool), lameduck: lame}
+	h := &health{Addr: addr, lameduck: lame}
 
 	c.OnStartup(h.OnStartup)
-	c.OnRestart(h.OnFinalShutdown)
+	c.OnRestart(h.OnReload)
 	c.OnFinalShutdown(h.OnFinalShutdown)
 	c.OnRestartFailed(h.OnStartup)
 
@@ -58,7 +58,7 @@ func parse(c *caddy.Controller) (string, time.Duration, error) {
 				}
 				dur = l
 			default:
-				return "", 0, c.ArgErr()
+				return "", 0, c.Errf("unknown property '%s'", c.Val())
 			}
 		}
 	}

@@ -21,7 +21,7 @@ func TestReplacer(t *testing.T) {
 	w := dnstest.NewRecorder(&test.ResponseWriter{})
 	r := new(dns.Msg)
 	r.SetQuestion("example.org.", dns.TypeHINFO)
-	r.MsgHdr.AuthenticatedData = true
+	r.AuthenticatedData = true
 	state := request.Request{W: w, Req: r}
 
 	replacer := New()
@@ -256,6 +256,12 @@ func TestLabels(t *testing.T) {
 		if repl != expect[lbl] {
 			t.Errorf("Expected value %q, got %q", expect[lbl], repl)
 		}
+
+		// test empty state and nil recorder won't panic
+		repl_empty := replacer.Replace(ctx, request.Request{}, nil, lbl)
+		if repl_empty != EmptyValue {
+			t.Errorf("Expected empty value %q, got %q", EmptyValue, repl_empty)
+		}
 	}
 }
 
@@ -263,49 +269,46 @@ func BenchmarkReplacer(b *testing.B) {
 	w := dnstest.NewRecorder(&test.ResponseWriter{})
 	r := new(dns.Msg)
 	r.SetQuestion("example.org.", dns.TypeHINFO)
-	r.MsgHdr.AuthenticatedData = true
+	r.AuthenticatedData = true
 	state := request.Request{W: w, Req: r}
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
 	replacer := New()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		replacer.Replace(context.TODO(), state, nil, "{type} {name} {size}")
 	}
 }
 
 func BenchmarkReplacer_CommonLogFormat(b *testing.B) {
-
 	w := dnstest.NewRecorder(&test.ResponseWriter{})
 	r := new(dns.Msg)
 	r.SetQuestion("example.org.", dns.TypeHINFO)
 	r.Id = 1053
 	r.AuthenticatedData = true
 	r.CheckingDisabled = true
-	r.MsgHdr.AuthenticatedData = true
+	r.AuthenticatedData = true
 	w.WriteMsg(r)
 	state := request.Request{W: w, Req: r}
 
 	replacer := New()
 	ctxt := context.TODO()
 
-	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		replacer.Replace(ctxt, state, w, CommonLogFormat)
 	}
 }
 
 func BenchmarkParseFormat(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		parseFormat(CommonLogFormat)
 	}
 }
 
 type testProvider map[string]metadata.Func
 
-func (tp testProvider) Metadata(ctx context.Context, state request.Request) context.Context {
+func (tp testProvider) Metadata(ctx context.Context, _state request.Request) context.Context {
 	for k, v := range tp {
 		metadata.SetValueFunc(ctx, k, v)
 	}
@@ -316,7 +319,7 @@ type testHandler struct{ ctx context.Context }
 
 func (m *testHandler) Name() string { return "test" }
 
-func (m *testHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (m *testHandler) ServeDNS(ctx context.Context, _w dns.ResponseWriter, _r *dns.Msg) (int, error) {
 	m.ctx = ctx
 	return 0, nil
 }
@@ -341,12 +344,11 @@ func TestMetadataReplacement(t *testing.T) {
 		Next: next,
 	}
 
-	m.ServeDNS(context.TODO(), &test.ResponseWriter{}, new(dns.Msg))
-	ctx := next.ctx // important because the m.ServeDNS has only now populated the context
-
 	w := dnstest.NewRecorder(&test.ResponseWriter{})
 	r := new(dns.Msg)
 	r.SetQuestion("example.org.", dns.TypeHINFO)
+
+	ctx := m.Collect(context.TODO(), request.Request{W: w, Req: r})
 
 	repl := New()
 	state := request.Request{W: w, Req: r}

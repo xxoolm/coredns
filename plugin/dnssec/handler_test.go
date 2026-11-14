@@ -38,6 +38,73 @@ var dnsTestCases = []test.Case{
 		},
 	},
 	{
+		Qname: "miek.nl.", Qtype: dns.TypeNS, Do: true,
+		Answer: []dns.RR{
+			test.NS("miek.nl.	1800	IN      NS      linode.atoom.net."),
+			test.RRSIG("miek.nl.	1800	IN	RRSIG	NS 13 2 1800 20220101121212 20220201121212 18512 miek.nl. RandomNotChecked"),
+		},
+	},
+	{
+		Qname: "deleg.miek.nl.", Qtype: dns.TypeNS, Do: true,
+		Ns: []dns.RR{
+			test.DS("deleg.miek.nl.	1800	IN      DS      18512 13 2 D4E806322598BC97A003EF1ACDFF352EEFF7B42DBB0D41B8224714C36AEF08D9"),
+			test.NS("deleg.miek.nl.	1800	IN      NS      ns01.deleg.miek.nl."),
+			test.RRSIG("deleg.miek.nl.	1800	IN	RRSIG	DS 13 3 1800 20220101121212 20220201121212 18512 miek.nl. RandomNotChecked"),
+		},
+	},
+	{
+		Qname: "unsigned.miek.nl.", Qtype: dns.TypeNS, Do: true,
+		Ns: []dns.RR{
+			test.NS("unsigned.miek.nl.	1800	IN      NS      ns01.deleg.miek.nl."),
+			test.NSEC("unsigned.miek.nl.	1800	IN	NSEC	unsigned\\000.miek.nl. NS RRSIG NSEC"),
+			test.RRSIG("unsigned.miek.nl.	1800	IN	RRSIG	NSEC 13 3 1800 20220101121212 20220201121212 18512 miek.nl. RandomNotChecked"),
+		},
+	},
+	{ // DS should not come from dnssec plugin
+		Qname: "deleg.miek.nl.", Qtype: dns.TypeDS,
+		Answer: []dns.RR{
+			test.DS("deleg.miek.nl.	1800	IN      DS      18512 13 2 D4E806322598BC97A003EF1ACDFF352EEFF7B42DBB0D41B8224714C36AEF08D9"),
+		},
+		Ns: []dns.RR{
+			test.NS("miek.nl.	1800	IN	NS	linode.atoom.net."),
+		},
+	},
+	{
+		Qname: "unsigned.miek.nl.", Qtype: dns.TypeDS,
+		Ns: []dns.RR{
+			test.SOA("miek.nl.	1800	IN	SOA	linode.atoom.net. miek.miek.nl. 1282630057 14400 3600 604800 14400"),
+		},
+	},
+	{
+		Qname: "miek.nl.", Qtype: dns.TypeDS, Do: true,
+		Ns: []dns.RR{
+			test.NSEC("miek.nl.	1800	IN	NSEC	\\000.miek.nl. A HINFO NS SOA MX TXT AAAA LOC SRV CERT SSHFP RRSIG NSEC DNSKEY TLSA HIP OPENPGPKEY SPF"),
+			test.RRSIG("miek.nl.	1800	IN	RRSIG	NSEC 13 2 1800 20220101121212 20220201121212 18512 miek.nl. RandomNotChecked"),
+			test.RRSIG("miek.nl.	1800	IN	RRSIG	SOA 13 2 3600 20171220141741 20171212111741 18512 miek.nl. 8bLTReqmuQtw=="),
+			test.SOA("miek.nl.	1800	IN	SOA	linode.atoom.net. miek.miek.nl. 1282630057 14400 3600 604800 14400"),
+		},
+	},
+	{
+		Qname: "deleg.miek.nl.", Qtype: dns.TypeDS, Do: true,
+		Answer: []dns.RR{
+			test.DS("deleg.miek.nl.	1800	IN      DS      18512 13 2 D4E806322598BC97A003EF1ACDFF352EEFF7B42DBB0D41B8224714C36AEF08D9"),
+			test.RRSIG("deleg.miek.nl.	1800	IN	RRSIG	DS 13 3 1800 20220101121212 20220201121212 18512 miek.nl. RandomNotChecked"),
+		},
+		Ns: []dns.RR{
+			test.NS("miek.nl.	1800	IN	NS	linode.atoom.net."),
+			test.RRSIG("miek.nl.	1800	IN	RRSIG	NS 13 2 3600 20161217114912 20161209084912 18512 miek.nl. ad9gA8VWgF1H8ze9/0Rk2Q=="),
+		},
+	},
+	{
+		Qname: "unsigned.miek.nl.", Qtype: dns.TypeDS, Do: true,
+		Ns: []dns.RR{
+			test.RRSIG("miek.nl.	1800	IN	RRSIG	SOA 13 2 3600 20171220141741 20171212111741 18512 miek.nl. 8bLTReqmuQtw=="),
+			test.SOA("miek.nl.	1800	IN	SOA	linode.atoom.net. miek.miek.nl. 1282630057 14400 3600 604800 14400"),
+			test.NSEC("unsigned.miek.nl.	1800	IN	NSEC	\\000.unsigned.miek.nl. NS RRSIG NSEC"),
+			test.RRSIG("unsigned.miek.nl.	1800	IN	RRSIG	NSEC 13 3 1800 20220101121212 20220201121212 18512 miek.nl. RandomNotChecked"),
+		},
+	},
+	{
 		Qname: "miek.nl.", Qtype: dns.TypeMX,
 		Answer: []dns.RR{
 			test.MX("miek.nl.	1800	IN	MX	1 aspmx.l.google.com."),
@@ -103,7 +170,7 @@ func TestLookupZone(t *testing.T) {
 	dnskey, rm1, rm2 := newKey(t)
 	defer rm1()
 	defer rm2()
-	c := cache.New(defaultCap)
+	c := cache.New[[]dns.RR](defaultCap)
 	dh := New([]string{"miek.nl."}, []*DNSKEY{dnskey}, false, fm, c)
 
 	for _, tc := range dnsTestCases {
@@ -126,7 +193,7 @@ func TestLookupDNSKEY(t *testing.T) {
 	dnskey, rm1, rm2 := newKey(t)
 	defer rm1()
 	defer rm2()
-	c := cache.New(defaultCap)
+	c := cache.New[[]dns.RR](defaultCap)
 	dh := New([]string{"miek.nl."}, []*DNSKEY{dnskey}, false, test.ErrorHandler(), c)
 
 	for _, tc := range dnssecTestCases {
@@ -179,4 +246,8 @@ $ORIGIN miek.nl.
 
 a               IN      A       139.162.196.78
                 IN      AAAA    2a01:7e00::f03c:91ff:fef1:6735
-www             IN      CNAME   a`
+www             IN      CNAME   a
+deleg			IN		NS		ns01.deleg
+				IN		DS		18512 13 2 D4E806322598BC97A003EF1ACDFF352EEFF7B42DBB0D41B8224714C36AEF08D9
+unsigned		IN		NS		ns01.deleg
+`

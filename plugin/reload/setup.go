@@ -3,10 +3,12 @@ package reload
 import (
 	"fmt"
 	"math/rand"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/coredns/caddy"
+	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 )
@@ -15,14 +17,22 @@ var log = clog.NewWithPlugin("reload")
 
 func init() { plugin.Register("reload", setup) }
 
-// the info reload is global to all application, whatever number of reloads.
-// it is used to transmit data between Setup and start of the hook called 'onInstanceStartup'
-// channel for QUIT is never changed in purpose.
-// WARNING: this data may be unsync after an invalid attempt of reload Corefile.
-var (
-	r              = reload{dur: defaultInterval, u: unused, quit: make(chan bool)}
-	once, shutOnce sync.Once
-)
+// The event hook is process-global, but reload state belongs to each Caddy instance.
+type reloadStorageKey struct{}
+
+func reloadForController(c *caddy.Controller) *reload {
+	if state, ok := c.Get(reloadStorageKey{}).(*reload); ok {
+		return state
+	}
+
+	state := newReload()
+	c.Set(reloadStorageKey{}, state)
+	// Stop this instance's watcher on both reload and final shutdown.
+	c.OnShutdown(state.shutdown)
+	return state
+}
+
+var eventHookMu sync.Mutex
 
 func setup(c *caddy.Controller) error {
 	c.Next() // 'reload'
@@ -52,31 +62,40 @@ func setup(c *caddy.Controller) error {
 		}
 		j = d
 	}
-	if j < minJitter {
-		return plugin.Error("reload", fmt.Errorf("jitter value must be greater or equal to %v", minJitter))
+
+	if j != 0 && j < minJitter {
+		return plugin.Error("reload", fmt.Errorf("jitter value must be 0 or greater or equal to %v", minJitter))
 	}
 
-	if j > i/2 {
+	if j > 0 && j > i/2 {
 		j = i / 2
 	}
 
-	jitter := time.Duration(rand.Int63n(j.Nanoseconds()) - (j.Nanoseconds() / 2))
-	i = i + jitter
+	if j > 0 {
+		jitter := time.Duration(rand.Int63n(j.Nanoseconds()) - (j.Nanoseconds() / 2)) // #nosec G404 -- non-cryptographic jitter.
+		i = i + jitter
+	}
 
 	// prepare info for next onInstanceStartup event
-	r.setInterval(i)
-	r.setUsage(used)
-	once.Do(func() {
-		caddy.RegisterEventHook("reload", hook)
-	})
-	// re-register on finalShutDown as the instance most-likely will be changed
-	shutOnce.Do(func() {
-		c.OnFinalShutdown(func() error {
-			r.quit <- true
-			return nil
-		})
-	})
+	state := reloadForController(c)
+	state.configHash = dnsserver.GetConfigHash(c)
+	state.setInterval(i)
+	state.setUsage(used)
+	registerEventHook()
 	return nil
+}
+
+// Caddy removes all event hooks before a SIGUSR1 restart. Register the hook
+// whenever the directive is set up so that it is restored for that restart,
+// while avoiding duplicate registration during ordinary reloads.
+func registerEventHook() {
+	eventHookMu.Lock()
+	defer eventHookMu.Unlock()
+
+	if slices.Contains(caddy.ListPlugins()["event_hooks"], "reload") {
+		return
+	}
+	caddy.RegisterEventHook("reload", hook)
 }
 
 const (

@@ -110,12 +110,26 @@ func (r *Request) RemoteAddr() string { return r.W.RemoteAddr().String() }
 // LocalAddr returns the net.Addr of the server handling the current request.
 func (r *Request) LocalAddr() string { return r.W.LocalAddr().String() }
 
+// unwrapAddr returns the underlying net.Addr for addresses that wrap a real
+// transport address (implementing Unwrap() net.Addr), so transport/family
+// classification sees the concrete *net.TCPAddr or *net.UDPAddr. Plain
+// addresses are returned unchanged.
+func unwrapAddr(a net.Addr) net.Addr {
+	if u, ok := a.(interface{ Unwrap() net.Addr }); ok {
+		if inner := u.Unwrap(); inner != nil {
+			return inner
+		}
+	}
+	return a
+}
+
 // Proto gets the protocol used as the transport. This will be udp or tcp.
 func (r *Request) Proto() string {
-	if _, ok := r.W.RemoteAddr().(*net.UDPAddr); ok {
+	ra := unwrapAddr(r.W.RemoteAddr())
+	if _, ok := ra.(*net.UDPAddr); ok {
 		return "udp"
 	}
-	if _, ok := r.W.RemoteAddr().(*net.TCPAddr); ok {
+	if _, ok := ra.(*net.TCPAddr); ok {
 		return "tcp"
 	}
 	return "udp"
@@ -128,7 +142,7 @@ func (r *Request) Family() int {
 	}
 
 	var a net.IP
-	ip := r.W.RemoteAddr()
+	ip := unwrapAddr(r.W.RemoteAddr())
 	if i, ok := ip.(*net.UDPAddr); ok {
 		a = i.IP
 	}
@@ -313,7 +327,6 @@ func (r *Request) Class() string {
 	}
 
 	return dns.Class(r.Req.Question[0].Qclass).String()
-
 }
 
 // QClass returns the class of the question in the request.
@@ -327,7 +340,6 @@ func (r *Request) QClass() uint16 {
 	}
 
 	return r.Req.Question[0].Qclass
-
 }
 
 // Clear clears all caching from Request s.
@@ -342,8 +354,8 @@ func (r *Request) Clear() {
 	r.do = false
 }
 
-// Match checks if the reply matches the qname and qtype from the request, it returns
-// false when they don't match.
+// Match checks if the reply matches the qname, qtype and qclass from the request.
+// It returns false when they don't match.
 func (r *Request) Match(reply *dns.Msg) bool {
 	if len(reply.Question) != 1 {
 		return false
@@ -358,6 +370,10 @@ func (r *Request) Match(reply *dns.Msg) bool {
 	}
 
 	if reply.Question[0].Qtype != r.QType() {
+		return false
+	}
+
+	if reply.Question[0].Qclass != r.QClass() {
 		return false
 	}
 

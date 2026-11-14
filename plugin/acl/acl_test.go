@@ -13,15 +13,21 @@ import (
 type testResponseWriter struct {
 	test.ResponseWriter
 	Rcode int
+	Msg   *dns.Msg
 }
 
 func (t *testResponseWriter) setRemoteIP(ip string) {
 	t.RemoteIP = ip
 }
 
+func (t *testResponseWriter) setZone(zone string) {
+	t.Zone = zone
+}
+
 // WriteMsg implement dns.ResponseWriter interface.
 func (t *testResponseWriter) WriteMsg(m *dns.Msg) error {
 	t.Rcode = m.Rcode
+	t.Msg = m
 	return nil
 }
 
@@ -38,359 +44,510 @@ func TestACLServeDNS(t *testing.T) {
 		qtype    uint16
 	}
 	tests := []struct {
-		name      string
-		config    string
-		zones     []string
-		args      args
-		wantRcode int
-		wantErr   bool
+		name                  string
+		config                string
+		zones                 []string
+		args                  args
+		wantRcode             int
+		wantErr               bool
+		wantExtendedErrorCode uint16
+		expectNoResponse      bool
 	}{
 		// IPv4 tests.
 		{
-			"Blacklist 1 BLOCKED",
-			`acl example.org {
+			name: "Blacklist 1 BLOCKED",
+			config: `acl example.org {
 				block type A net 192.168.0.0/16
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.168.0.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.0.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Blacklist 1 ALLOWED",
-			`acl example.org {
+			name: "Blacklist 1 ALLOWED",
+			config: `acl example.org {
 				block type A net 192.168.0.0/16
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.167.0.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.167.0.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Blacklist 2 BLOCKED",
-			`
+			name: "Blacklist 2 BLOCKED",
+			config: `
 			acl example.org {
 				block type * net 192.168.0.0/16
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.168.0.2",
-				dns.TypeAAAA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.0.2",
+				qtype:    dns.TypeAAAA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Blacklist 3 BLOCKED",
-			`acl example.org {
+			name: "Blacklist 3 BLOCKED",
+			config: `acl example.org {
 				block type A
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"10.1.0.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "10.1.0.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Blacklist 3 ALLOWED",
-			`acl example.org {
+			name: "Blacklist 3 ALLOWED",
+			config: `acl example.org {
 				block type A
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"10.1.0.2",
-				dns.TypeAAAA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "10.1.0.2",
+				qtype:    dns.TypeAAAA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Blacklist 4 Single IP BLOCKED",
-			`acl example.org {
+			name: "Blacklist 4 Single IP BLOCKED",
+			config: `acl example.org {
 				block type A net 192.168.1.2
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.168.1.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.1.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Blacklist 4 Single IP ALLOWED",
-			`acl example.org {
+			name: "Blacklist 4 Single IP ALLOWED",
+			config: `acl example.org {
 				block type A net 192.168.1.2
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.168.1.3",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.1.3",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Filter 1 FILTERED",
-			`acl example.org {
+			name: "Filter 1 FILTERED",
+			config: `acl example.org {
 				filter type A net 192.168.0.0/16
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.168.0.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.0.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode:             dns.RcodeSuccess,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeFiltered,
 		},
 		{
-			"Filter 1 ALLOWED",
-			`acl example.org {
+			name: "Filter 1 ALLOWED",
+			config: `acl example.org {
 				filter type A net 192.168.0.0/16
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.167.0.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.167.0.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Whitelist 1 ALLOWED",
-			`acl example.org {
+			name: "Whitelist 1 ALLOWED",
+			config: `acl example.org {
 				allow net 192.168.0.0/16
 				block
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"192.168.0.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.0.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Whitelist 1 REFUSED",
-			`acl example.org {
+			name: "Whitelist 1 REFUSED",
+			config: `acl example.org {
 				allow type * net 192.168.0.0/16
 				block
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"10.1.0.2",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "10.1.0.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Fine-Grained 1 REFUSED",
-			`acl a.example.org {
+			name: "Drop 1 DROPPED",
+			config: `acl example.org {
+				drop net 192.168.0.0/16
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.0.2",
+				qtype:    dns.TypeA,
+			},
+			wantRcode:        dns.RcodeSuccess,
+			expectNoResponse: true,
+		},
+		{
+			name: "Subnet-Order 1 REFUSED",
+			config: `acl example.org {
+				block net 192.168.1.0/24
+				drop net 192.168.0.0/16
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.1.2",
+				qtype:    dns.TypeA,
+			},
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
+		},
+		{
+			name: "Subnet-Order 2 DROPPED",
+			config: `acl example.org {
+				drop net 192.168.0.0/16
+				block net 192.168.1.0/24
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.1.1",
+				qtype:    dns.TypeA,
+			},
+			wantRcode:        dns.RcodeSuccess,
+			expectNoResponse: true,
+		},
+		{
+			name: "Drop-Type 1 DROPPED",
+			config: `acl example.org {
+				drop type A
+				allow net 192.168.0.0/16
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.1.1",
+				qtype:    dns.TypeA,
+			},
+			wantRcode:        dns.RcodeSuccess,
+			expectNoResponse: true,
+		},
+		{
+			name: "Drop-Type 2 ALLOWED",
+			config: `acl example.org {
+				drop type A
+				allow net 192.168.0.0/16
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.1.1",
+				qtype:    dns.TypeAAAA,
+			},
+			wantRcode: dns.RcodeSuccess,
+		},
+		{
+			name: "Fine-Grained 1 REFUSED",
+			config: `acl a.example.org {
 				block type * net 192.168.1.0/24
 			}`,
-			[]string{"example.org"},
-			args{
-				"a.example.org.",
-				"192.168.1.2",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "a.example.org.",
+				sourceIP: "192.168.1.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Fine-Grained 1 ALLOWED",
-			`acl a.example.org {
+			name: "Fine-Grained 1 ALLOWED",
+			config: `acl a.example.org {
 				block net 192.168.1.0/24
 			}`,
-			[]string{"example.org"},
-			args{
-				"www.example.org.",
-				"192.168.1.2",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "192.168.1.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Fine-Grained 2 REFUSED",
-			`acl example.org {
+			name: "Fine-Grained 2 REFUSED",
+			config: `acl example.org {
 				block net 192.168.1.0/24
 			}`,
-			[]string{"example.org"},
-			args{
-				"a.example.org.",
-				"192.168.1.2",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "a.example.org.",
+				sourceIP: "192.168.1.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Fine-Grained 2 ALLOWED",
-			`acl {
+			name: "Fine-Grained 2 ALLOWED",
+			config: `acl {
 				block net 192.168.1.0/24
 			}`,
-			[]string{"example.org"},
-			args{
-				"a.example.com.",
-				"192.168.1.2",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "a.example.com.",
+				sourceIP: "192.168.1.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Fine-Grained 3 REFUSED",
-			`acl a.example.org {
+			name: "Fine-Grained 3 REFUSED",
+			config: `acl a.example.org {
 				block net 192.168.1.0/24
 			}
 			acl b.example.org {
 				block type * net 192.168.2.0/24
 			}`,
-			[]string{"example.org"},
-			args{
-				"b.example.org.",
-				"192.168.2.2",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "b.example.org.",
+				sourceIP: "192.168.2.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Fine-Grained 3 ALLOWED",
-			`acl a.example.org {
+			name: "Fine-Grained 3 ALLOWED",
+			config: `acl a.example.org {
 				block net 192.168.1.0/24
 			}
 			acl b.example.org {
 				block net 192.168.2.0/24
 			}`,
-			[]string{"example.org"},
-			args{
-				"b.example.org.",
-				"192.168.1.2",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "b.example.org.",
+				sourceIP: "192.168.1.2",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		// IPv6 tests.
 		{
-			"Blacklist 1 BLOCKED IPv6",
-			`acl example.org {
+			name: "Blacklist 1 BLOCKED IPv6",
+			config: `acl example.org {
 				block type A net 2001:db8:abcd:0012::0/64
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"2001:db8:abcd:0012::1230",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:db8:abcd:0012::1230",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Blacklist 1 ALLOWED IPv6",
-			`acl example.org {
+			name: "Blacklist 1 ALLOWED IPv6",
+			config: `acl example.org {
 				block type A net 2001:db8:abcd:0012::0/64
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"2001:db8:abcd:0013::0",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:db8:abcd:0013::0",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Blacklist 2 BLOCKED IPv6",
-			`acl example.org {
+			name: "Blacklist 2 BLOCKED IPv6",
+			config: `acl example.org {
 				block type A
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"2001:0db8:85a3:0000:0000:8a2e:0370:7334",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Blacklist 3 Single IP BLOCKED IPv6",
-			`acl example.org {
+			name: "Blacklist 3 Single IP BLOCKED IPv6",
+			config: `acl example.org {
 				block type A net 2001:0db8:85a3:0000:0000:8a2e:0370:7334
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"2001:0db8:85a3:0000:0000:8a2e:0370:7334",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Blacklist 3 Single IP ALLOWED IPv6",
-			`acl example.org {
+			name: "Blacklist 3 Single IP ALLOWED IPv6",
+			config: `acl example.org {
 				block type A net 2001:0db8:85a3:0000:0000:8a2e:0370:7334
 			}`,
-			[]string{},
-			args{
-				"www.example.org.",
-				"2001:0db8:85a3:0000:0000:8a2e:0370:7335",
-				dns.TypeA,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:0db8:85a3:0000:0000:8a2e:0370:7335",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
 		},
 		{
-			"Fine-Grained 1 REFUSED IPv6",
-			`acl a.example.org {
+			name: "Fine-Grained 1 REFUSED IPv6",
+			config: `acl a.example.org {
 				block type * net 2001:db8:abcd:0012::0/64
 			}`,
-			[]string{"example.org"},
-			args{
-				"a.example.org.",
-				"2001:db8:abcd:0012:2019::0",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "a.example.org.",
+				sourceIP: "2001:db8:abcd:0012:2019::0",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeRefused,
-			false,
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
 		},
 		{
-			"Fine-Grained 1 ALLOWED IPv6",
-			`acl a.example.org {
+			name: "Fine-Grained 1 ALLOWED IPv6",
+			config: `acl a.example.org {
 				block net 2001:db8:abcd:0012::0/64
 			}`,
-			[]string{"example.org"},
-			args{
-				"www.example.org.",
-				"2001:db8:abcd:0012:2019::0",
-				dns.TypeA,
+			zones: []string{"example.org"},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:db8:abcd:0012:2019::0",
+				qtype:    dns.TypeA,
 			},
-			dns.RcodeSuccess,
-			false,
+			wantRcode: dns.RcodeSuccess,
+		},
+		{
+			name: "Blacklist Address%ifname",
+			config: `acl example.org {
+				block type AAAA net 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+			}`,
+			zones: []string{"eth0"},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+				qtype:    dns.TypeAAAA,
+			},
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
+		},
+		{
+			name: "Drop 1 DROPPED IPV6",
+			config: `acl example.org {
+				drop net 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+				qtype:    dns.TypeAAAA,
+			},
+			wantRcode:        dns.RcodeSuccess,
+			expectNoResponse: true,
+		},
+		{
+			name: "Subnet-Order 1 REFUSED IPv6",
+			config: `acl example.org {
+				block net 2001:db8:abcd:0012:8000::/66
+				drop net 2001:db8:abcd:0012::0/64
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:db8:abcd:0012:8000::1",
+				qtype:    dns.TypeAAAA,
+			},
+			wantRcode:             dns.RcodeRefused,
+			wantExtendedErrorCode: dns.ExtendedErrorCodeBlocked,
+		},
+		{
+			name: "Subnet-Order 2 DROPPED IPv6",
+			config: `acl example.org {
+				drop net 2001:db8:abcd:0012::0/64
+				block net 2001:db8:abcd:0012:8000::/66
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:db8:abcd:0012:8000::1",
+				qtype:    dns.TypeAAAA,
+			},
+			wantRcode:        dns.RcodeSuccess,
+			expectNoResponse: true,
+		},
+		{
+			name: "Drop-Type 1 DROPPED IPv6",
+			config: `acl example.org {
+				drop type A
+				allow net 2001:db8:85a3:0000::0/64
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+				qtype:    dns.TypeA,
+			},
+			wantRcode:        dns.RcodeSuccess,
+			expectNoResponse: true,
+		},
+		{
+			name: "Drop-Type 2 ALLOWED IPv6",
+			config: `acl example.org {
+				drop type A
+				allow net 2001:db8:85a3:0000::0/64
+			}`,
+			zones: []string{},
+			args: args{
+				domain:   "www.example.org.",
+				sourceIP: "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+				qtype:    dns.TypeAAAA,
+			},
+			wantRcode: dns.RcodeSuccess,
 		},
 	}
 
@@ -408,7 +565,13 @@ func TestACLServeDNS(t *testing.T) {
 			w := &testResponseWriter{}
 			m := new(dns.Msg)
 			w.setRemoteIP(tt.args.sourceIP)
+			if len(tt.zones) > 0 {
+				w.setZone(tt.zones[0])
+			}
 			m.SetQuestion(tt.args.domain, tt.args.qtype)
+			if tt.wantExtendedErrorCode != 0 {
+				m.SetEdns0(4096, false)
+			}
 			_, err = a.ServeDNS(ctx, w, m)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Error: acl.ServeDNS() error = %v, wantErr %v", err, tt.wantErr)
@@ -416,6 +579,76 @@ func TestACLServeDNS(t *testing.T) {
 			}
 			if w.Rcode != tt.wantRcode {
 				t.Errorf("Error: acl.ServeDNS() Rcode = %v, want %v", w.Rcode, tt.wantRcode)
+			}
+			if tt.expectNoResponse && w.Msg != nil {
+				t.Errorf("Error: acl.ServeDNS() responded to client when not expected")
+			}
+			if tt.wantExtendedErrorCode != 0 {
+				matched := false
+				for _, opt := range w.Msg.IsEdns0().Option {
+					if ede, ok := opt.(*dns.EDNS0_EDE); ok {
+						if ede.InfoCode != tt.wantExtendedErrorCode {
+							t.Errorf("Error: acl.ServeDNS() Extended DNS Error = %v, want %v", ede.InfoCode, tt.wantExtendedErrorCode)
+						}
+						matched = true
+					}
+				}
+				if !matched {
+					t.Error("Error: acl.ServeDNS() missing Extended DNS Error option")
+				}
+			}
+		})
+	}
+}
+
+func TestACLResponseEDNS(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+		edns   bool
+		do     bool
+	}{
+		{name: "block without EDNS", action: "block"},
+		{name: "filter without EDNS", action: "filter"},
+		{name: "block with EDNS", action: "block", edns: true},
+		{name: "filter with EDNS", action: "filter", edns: true},
+		{name: "block with EDNS and DO", action: "block", edns: true, do: true},
+		{name: "filter with EDNS and DO", action: "filter", edns: true, do: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctr := NewTestControllerWithZones("acl example.org {\n"+tt.action+" net 192.168.0.0/16\n}", []string{})
+			a, err := parse(ctr)
+			if err != nil {
+				t.Fatalf("Cannot parse acl from config: %v", err)
+			}
+			a.Next = test.NextHandler(dns.RcodeSuccess, nil)
+
+			w := &testResponseWriter{}
+			w.setRemoteIP("192.168.0.2")
+			m := new(dns.Msg)
+			m.SetQuestion("www.example.org.", dns.TypeA)
+			if tt.edns {
+				m.SetEdns0(1232, tt.do)
+			}
+
+			if _, err := a.ServeDNS(context.Background(), w, m); err != nil {
+				t.Fatalf("ServeDNS() error = %v", err)
+			}
+
+			opt := w.Msg.IsEdns0()
+			if !tt.edns {
+				if opt != nil {
+					t.Errorf("response has an OPT record, but the request had none")
+				}
+				return
+			}
+			if opt == nil {
+				t.Fatal("response has no OPT record, but the request had one")
+			}
+			if opt.Do() != tt.do {
+				t.Errorf("response DO bit = %v, want %v", opt.Do(), tt.do)
 			}
 		})
 	}

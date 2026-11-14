@@ -1,13 +1,15 @@
-// Package forward implements a forwarding proxy. It caches an upstream net.Conn for some time, so if the same
-// client returns the upstream's Conn will be precached. Depending on how you benchmark this looks to be
-// 50% faster than just opening a new connection for every client. It works with UDP and TCP and uses
-// inband healthchecking.
+// Package forward implements a DNS forwarding proxy. It reuses upstream
+// connections across DNS, DoT, DoH, and DoQ transports and uses in-band
+// health checking.
 package forward
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"net"
+	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/coredns/coredns/plugin/dnstap"
 	"github.com/coredns/coredns/plugin/metadata"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	proxyPkg "github.com/coredns/coredns/plugin/pkg/proxy"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
@@ -25,45 +28,82 @@ import (
 
 var log = clog.NewWithPlugin("forward")
 
+const (
+	defaultExpire                     = 10 * time.Second
+	defaultReadTimeout                = 2 * time.Second
+	hcInterval                        = 500 * time.Millisecond
+	defaultConnectAttemptsPerUpstream = 2
+)
+
 // Forward represents a plugin instance that can proxy requests to another (DNS) server. It has a list
 // of proxies each representing one upstream proxy.
 type Forward struct {
 	concurrent int64 // atomic counters need to be first in struct for proper alignment
 
-	proxies    []*Proxy
-	p          Policy
-	hcInterval time.Duration
+	proxies     []*proxyPkg.Proxy
+	p           Policy
+	hcInterval  time.Duration
+	startFailed bool
 
 	from    string
 	ignored []string
 
-	tlsConfig     *tls.Config
-	tlsServerName string
-	maxfails      uint32
-	expire        time.Duration
-	maxConcurrent int64
+	nextAlternateRcodes []int
+	nextOnNodata        bool
 
-	opts options // also here for testing
+	tlsConfig                  *tls.Config
+	tlsServerName              string
+	maxfails                   uint32
+	expire                     time.Duration
+	maxAge                     time.Duration
+	readTimeout                time.Duration
+	maxIdleConns               int
+	dohMethod                  string
+	maxConcurrent              int64
+	failfastUnhealthyUpstreams bool
+	failoverRcodes             []int
+	maxConnectAttempts         uint32
+	maxConnectAttemptsSet      bool
+	sourceAddress              net.IP
+
+	// Hostname resolution fields
+	resolver  []string  // custom resolver IPs for hostname TO resolution
+	toEntries []toEntry // ordered TO entries preserving config order
+
+	opts proxyPkg.Options // also here for testing
 
 	// ErrLimitExceeded indicates that a query was rejected because the number of concurrent queries has exceeded
 	// the maximum allowed (maxConcurrent)
 	ErrLimitExceeded error
 
-	tapPlugin *dnstap.Dnstap // when the dnstap plugin is loaded, we use to this to send messages out.
+	tapPlugins []*dnstap.Dnstap // when dnstap plugins are loaded, we use to this to send messages out.
 
 	Next plugin.Handler
 }
 
 // New returns a new Forward.
 func New() *Forward {
-	f := &Forward{maxfails: 2, tlsConfig: new(tls.Config), expire: defaultExpire, p: new(random), from: ".", hcInterval: hcInterval, opts: options{forceTCP: false, preferUDP: false, hcRecursionDesired: true}}
+	f := &Forward{maxfails: 2, tlsConfig: new(tls.Config), expire: defaultExpire, readTimeout: defaultReadTimeout, p: new(random), from: ".", hcInterval: hcInterval, dohMethod: http.MethodPost, opts: proxyPkg.Options{ForceTCP: false, PreferUDP: false, HCRecursionDesired: true, HCDomain: "."}}
 	return f
 }
 
 // SetProxy appends p to the proxy list and starts healthchecking.
-func (f *Forward) SetProxy(p *Proxy) {
+func (f *Forward) SetProxy(p *proxyPkg.Proxy) {
 	f.proxies = append(f.proxies, p)
-	p.start(f.hcInterval)
+	p.Start(f.hcInterval)
+}
+
+// SetProxyOptions setup proxy options
+func (f *Forward) SetProxyOptions(opts proxyPkg.Options) {
+	f.opts = opts
+}
+
+// SetTapPlugin appends one or more dnstap plugins to the tap plugin list.
+func (f *Forward) SetTapPlugin(tapPlugin *dnstap.Dnstap) {
+	f.tapPlugins = append(f.tapPlugins, tapPlugin)
+	if nextPlugin, ok := tapPlugin.Next.(*dnstap.Dnstap); ok {
+		f.SetTapPlugin(nextPlugin)
+	}
 }
 
 // Len returns the number of configured proxies.
@@ -74,7 +114,6 @@ func (f *Forward) Name() string { return "forward" }
 
 // ServeDNS implements plugin.Handler.
 func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-
 	state := request.Request{W: w, Req: r}
 	if !f.match(state) {
 		return plugin.NextOrFailure(f.Name(), f.Next, ctx, w, r)
@@ -84,12 +123,13 @@ func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		count := atomic.AddInt64(&(f.concurrent), 1)
 		defer atomic.AddInt64(&(f.concurrent), -1)
 		if count > f.maxConcurrent {
-			MaxConcurrentRejectCount.Add(1)
+			maxConcurrentRejectCount.Add(1)
 			return dns.RcodeRefused, f.ErrLimitExceeded
 		}
 	}
 
 	fails := 0
+	failoverAttempts := 0
 	var span, child ot.Span
 	var upstreamErr error
 	span = ot.SpanFromContext(ctx)
@@ -97,7 +137,22 @@ func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	list := f.List()
 	deadline := time.Now().Add(defaultTimeout)
 	start := time.Now()
-	for time.Now().Before(deadline) {
+	maxConnectAttempts := uint64(f.maxConnectAttempts)
+	if !f.maxConnectAttemptsSet {
+		maxConnectAttempts = uint64(defaultConnectAttemptsPerUpstream) * uint64(len(list))
+	}
+	connectAttempts := uint64(0)
+	tlsDeadline := deadline
+	if d, ok := ctx.Deadline(); ok && d.Before(tlsDeadline) {
+		tlsDeadline = d
+	}
+	tlsConnectTimeout := time.Until(tlsDeadline)
+	if maxConnectAttempts != 1 {
+		// Reserve time for a fresh connection if the first TLS handshake stalls.
+		tlsConnectTimeout /= 2
+	}
+
+	for time.Now().Before(deadline) && ctx.Err() == nil && (maxConnectAttempts == 0 || connectAttempts < maxConnectAttempts) {
 		if i >= len(list) {
 			// reached the end of list, reset to begin
 			i = 0
@@ -111,37 +166,49 @@ func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			if fails < len(f.proxies) {
 				continue
 			}
-			// All upstream proxies are dead, assume healthcheck is completely broken and randomly
+
+			healthcheckBrokenCount.Add(1)
+			// All upstreams are dead, return servfail if all upstreams are down
+			if f.failfastUnhealthyUpstreams {
+				break
+			}
+			// assume healthcheck is completely broken and randomly
 			// select an upstream to connect to.
 			r := new(random)
 			proxy = r.List(f.proxies)[0]
-
-			HealthcheckBrokenCount.Add(1)
 		}
 
 		if span != nil {
 			child = span.Tracer().StartSpan("connect", ot.ChildOf(span.Context()))
-			otext.PeerAddress.Set(child, proxy.addr)
+			otext.PeerAddress.Set(child, proxy.Addr())
 			ctx = ot.ContextWithSpan(ctx, child)
 		}
 
 		metadata.SetValueFunc(ctx, "forward/upstream", func() string {
-			return proxy.addr
+			return proxy.Addr()
 		})
 
 		var (
-			ret *dns.Msg
-			err error
+			ret           *dns.Msg
+			localAddr     net.Addr
+			upstreamProto string
+			err           error
 		)
 		opts := f.opts
+
 		for {
-			ret, err = proxy.Connect(ctx, state, opts)
-			if err == ErrCachedClosed { // Remote side closed conn, can only happen with TCP.
+			opts.TLSConnectDeadline = time.Now().Add(tlsConnectTimeout)
+			if opts.TLSConnectDeadline.After(tlsDeadline) {
+				opts.TLSConnectDeadline = tlsDeadline
+			}
+			ret, localAddr, upstreamProto, err = proxy.Connect(ctx, state, opts)
+
+			if err == proxyPkg.ErrCachedClosed { // The peer closed a cached TCP or QUIC connection before the query was sent.
 				continue
 			}
 			// Retry with TCP if truncated and prefer_udp configured.
-			if ret != nil && ret.Truncated && !opts.forceTCP && opts.preferUDP {
-				opts.forceTCP = true
+			if ret != nil && ret.Truncated && !opts.ForceTCP && opts.PreferUDP {
+				opts.ForceTCP = true
 				continue
 			}
 			break
@@ -151,16 +218,30 @@ func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			child.Finish()
 		}
 
-		if f.tapPlugin != nil {
-			toDnstap(f, proxy.addr, state, opts, ret, start)
+		if len(f.tapPlugins) != 0 {
+			toDnstap(ctx, f, proxy.Addr(), localAddr, upstreamProto, state, ret, start)
 		}
 
 		upstreamErr = err
 
 		if err != nil {
+			if errors.Is(err, proxyPkg.ErrInvalidRequest) {
+				return dns.RcodeFormatError, err
+			}
+			if errors.Is(err, proxyPkg.ErrUnsupportedRequest) {
+				return dns.RcodeNotImplemented, err
+			}
+
 			// Kick off health check to see if *our* upstream is broken.
 			if f.maxfails != 0 {
 				proxy.Healthcheck()
+			}
+
+			if maxConnectAttempts > 0 {
+				connectAttempts++
+				if connectAttempts >= maxConnectAttempts {
+					break
+				}
 			}
 
 			if fails < len(f.proxies) {
@@ -177,6 +258,33 @@ func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			formerr.SetRcode(state.Req, dns.RcodeFormatError)
 			w.WriteMsg(formerr)
 			return 0, nil
+		}
+
+		// Check if we have a failover Rcode defined, check if we match on the code
+		tryNext := false
+		if slices.Contains(f.failoverRcodes, ret.Rcode) {
+			failoverAttempts++
+			tryNext = failoverAttempts < len(f.proxies)
+		}
+		if tryNext {
+			continue
+		}
+
+		// Check if we have an alternate Rcode defined, check if we match on the code
+		for _, alternateRcode := range f.nextAlternateRcodes {
+			if alternateRcode == ret.Rcode && f.Next != nil { // In case we do not have a Next handler, just continue normally
+				if _, ok := f.Next.(*Forward); ok { // Only continue if the next forwarder is also a Forworder
+					return plugin.NextOrFailure(f.Name(), f.Next, ctx, w, r)
+				}
+			}
+		}
+
+		if f.nextOnNodata && f.Next != nil {
+			if ret.Rcode == dns.RcodeSuccess && isEmpty(ret) {
+				if _, ok := f.Next.(*Forward); ok {
+					return plugin.NextOrFailure(f.Name(), f.Next, ctx, w, r)
+				}
+			}
 		}
 
 		w.WriteMsg(ret)
@@ -211,14 +319,27 @@ func (f *Forward) isAllowedDomain(name string) bool {
 	return true
 }
 
+func isEmpty(r *dns.Msg) bool {
+	if len(r.Answer) == 0 {
+		return true
+	}
+
+	for _, r := range r.Answer {
+		if r != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // ForceTCP returns if TCP is forced to be used even when the request comes in over UDP.
-func (f *Forward) ForceTCP() bool { return f.opts.forceTCP }
+func (f *Forward) ForceTCP() bool { return f.opts.ForceTCP }
 
 // PreferUDP returns if UDP is preferred to be used even when the request comes in over TCP.
-func (f *Forward) PreferUDP() bool { return f.opts.preferUDP }
+func (f *Forward) PreferUDP() bool { return f.opts.PreferUDP }
 
 // List returns a set of proxies to be used for this client depending on the policy in f.
-func (f *Forward) List() []*Proxy { return f.p.List(f.proxies) }
+func (f *Forward) List() []*proxyPkg.Proxy { return f.p.List(f.proxies) }
 
 var (
 	// ErrNoHealthy means no healthy proxies left.
@@ -229,11 +350,16 @@ var (
 	ErrCachedClosed = errors.New("cached connection was closed by peer")
 )
 
-// options holds various options that can be set.
-type options struct {
-	forceTCP           bool
-	preferUDP          bool
-	hcRecursionDesired bool
+// Options holds various Options that can be set.
+type Options struct {
+	// ForceTCP use TCP protocol for upstream DNS request. Has precedence over PreferUDP flag
+	ForceTCP bool
+	// PreferUDP use UDP protocol for upstream DNS request.
+	PreferUDP bool
+	// HCRecursionDesired sets recursion desired flag for Proxy healthcheck requests
+	HCRecursionDesired bool
+	// HCDomain sets domain for Proxy healthcheck requests
+	HCDomain string
 }
 
 var defaultTimeout = 5 * time.Second

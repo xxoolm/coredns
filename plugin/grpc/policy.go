@@ -1,8 +1,10 @@
 package grpc
 
 import (
-	"math/rand"
 	"sync/atomic"
+	"time"
+
+	"github.com/coredns/coredns/plugin/pkg/rand"
 )
 
 // Policy defines a policy we use for selecting upstreams.
@@ -18,16 +20,18 @@ func (r *random) String() string { return "random" }
 
 func (r *random) List(p []*Proxy) []*Proxy {
 	switch len(p) {
+	case 0:
+		return nil
 	case 1:
 		return p
 	case 2:
-		if rand.Int()%2 == 0 {
+		if rn.Int()%2 == 0 {
 			return []*Proxy{p[1], p[0]} // swap
 		}
 		return p
 	}
 
-	perms := rand.Perm(len(p))
+	perms := rn.Perm(len(p))
 	rnd := make([]*Proxy, len(p))
 
 	for i, p1 := range perms {
@@ -44,10 +48,14 @@ type roundRobin struct {
 func (r *roundRobin) String() string { return "round_robin" }
 
 func (r *roundRobin) List(p []*Proxy) []*Proxy {
-	poolLen := uint32(len(p))
+	if len(p) == 0 {
+		return nil
+	}
+	poolLen := uint32(len(p)) // #nosec G115 -- pool length is small
 	i := atomic.AddUint32(&r.robin, 1) % poolLen
 
-	robin := []*Proxy{p[i]}
+	robin := make([]*Proxy, 0, len(p))
+	robin = append(robin, p[i])
 	robin = append(robin, p[:i]...)
 	robin = append(robin, p[i+1:]...)
 
@@ -62,3 +70,5 @@ func (r *sequential) String() string { return "sequential" }
 func (r *sequential) List(p []*Proxy) []*Proxy {
 	return p
 }
+
+var rn = rand.New(time.Now().UnixNano())

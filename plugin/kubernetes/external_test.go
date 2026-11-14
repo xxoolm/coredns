@@ -28,11 +28,8 @@ var extCases = []struct {
 	{
 		Qname: "svc6.testns.example.org.", Rcode: dns.RcodeSuccess,
 		Msg: []msg.Service{
-			{Host: "1:2::5", Port: 80, TTL: 5, Key: "/c/org/example/testns/svc1"},
+			{Host: "1:2::5", Port: 80, TTL: 5, Key: "/c/org/example/testns/svc6"},
 		},
-	},
-	{
-		Qname: "*._not-udp-or-tcp.svc1.testns.example.com.", Rcode: dns.RcodeSuccess,
 	},
 	{
 		Qname: "_http._tcp.svc1.testns.example.com.", Rcode: dns.RcodeSuccess,
@@ -46,6 +43,22 @@ var extCases = []struct {
 	{
 		Qname: "svc0.svc-nons.example.com.", Rcode: dns.RcodeNameError,
 	},
+	{
+		Qname: "svc-headless.testns.example.com.", Rcode: dns.RcodeSuccess,
+		Msg: []msg.Service{
+			{Host: "1.2.3.4", Port: 80, TTL: 5, Weight: 50, Key: "/c/org/example/testns/svc-headless/endpoint-svc-0"},
+			{Host: "1.2.3.5", Port: 80, TTL: 5, Weight: 50, Key: "/c/org/example/testns/svc-headless/endpoint-svc-1"},
+		},
+	},
+	{
+		Qname: "endpoint-svc-0.svc-headless.testns.example.com.", Rcode: dns.RcodeSuccess,
+		Msg: []msg.Service{
+			{Host: "1.2.3.4", Port: 80, TTL: 5, Weight: 100, Key: "/c/org/example/testns/svc-headless/endpoint-svc-0"},
+		},
+	},
+	{
+		Qname: "endpoint-1.svc-nons.testns.example.com.", Rcode: dns.RcodeNameError,
+	},
 }
 
 func TestExternal(t *testing.T) {
@@ -57,7 +70,7 @@ func TestExternal(t *testing.T) {
 	for i, tc := range extCases {
 		state := testRequest(tc.Qname)
 
-		svc, rcode := k.External(state)
+		svc, rcode := k.External(state, true)
 
 		if x := tc.Rcode; x != rcode {
 			t.Errorf("Test %d, expected rcode %d, got %d", i, x, rcode)
@@ -71,29 +84,76 @@ func TestExternal(t *testing.T) {
 			if x := tc.Msg[j].Key; x != s.Key {
 				t.Errorf("Test %d, expected key %s, got %s", i, x, s.Key)
 			}
-			return
 		}
 	}
 }
 
 type external struct{}
 
-func (external) HasSynced() bool                                                   { return true }
-func (external) Run()                                                              {}
-func (external) Stop() error                                                       { return nil }
-func (external) EpIndexReverse(string) []*object.Endpoints                         { return nil }
-func (external) SvcIndexReverse(string) []*object.Service                          { return nil }
-func (external) Modified() int64                                                   { return 0 }
-func (external) EpIndex(s string) []*object.Endpoints                              { return nil }
-func (external) EndpointsList() []*object.Endpoints                                { return nil }
-func (external) GetNodeByName(ctx context.Context, name string) (*api.Node, error) { return nil, nil }
-func (external) SvcIndex(s string) []*object.Service                               { return svcIndexExternal[s] }
-func (external) PodIndex(string) []*object.Pod                                     { return nil }
+func (external) HasSynced() bool                                  { return true }
+func (external) Run()                                             {}
+func (external) Stop() error                                      { return nil }
+func (external) EpIndexReverse(string) []*object.Endpoints        { return nil }
+func (external) SvcIndexReverse(string) []*object.Service         { return nil }
+func (external) SvcExtIndexReverse(string) []*object.Service      { return nil }
+func (external) SvcImportIndex(string) []*object.ServiceImport    { return nil }
+func (external) ServiceImportList() []*object.ServiceImport       { return nil }
+func (external) McEpIndex(string) []*object.MultiClusterEndpoints { return nil }
+func (external) Modified(ModifiedMode) int64                      { return 0 }
+func (external) EpIndex(s string) []*object.Endpoints {
+	return epIndexExternal[s]
+}
+
+func (external) EndpointsList() []*object.Endpoints {
+	eps := make([]*object.Endpoints, 0, len(epIndexExternal))
+	for _, ep := range epIndexExternal {
+		eps = append(eps, ep...)
+	}
+	return eps
+}
+func (external) GetNodeByName(_ctx context.Context, _name string) (*api.Node, error) { return nil, nil }
+func (external) SvcIndex(s string) []*object.Service                                 { return svcIndexExternal[s] }
+func (external) PodIndex(string) []*object.Pod                                       { return nil }
 
 func (external) GetNamespaceByName(name string) (*object.Namespace, error) {
 	return &object.Namespace{
 		Name: name,
 	}, nil
+}
+
+var epIndexExternal = map[string][]*object.Endpoints{
+	"svc-headless.testns": {
+		{
+			Name:      "svc-headless",
+			Namespace: "testns",
+			Index:     "svc-headless.testns",
+			Subsets: []object.EndpointSubset{
+				{
+					Ports: []object.EndpointPort{
+						{
+							Port:     80,
+							Name:     "http",
+							Protocol: "TCP",
+						},
+					},
+					Addresses: []object.EndpointAddress{
+						{
+							IP:            "1.2.3.4",
+							Hostname:      "endpoint-svc-0",
+							NodeName:      "test-node",
+							TargetRefName: "endpoint-svc-0",
+						},
+						{
+							IP:            "1.2.3.5",
+							Hostname:      "endpoint-svc-1",
+							NodeName:      "test-node",
+							TargetRefName: "endpoint-svc-1",
+						},
+					},
+				},
+			},
+		},
+	},
 }
 
 var svcIndexExternal = map[string][]*object.Service{
@@ -117,10 +177,19 @@ var svcIndexExternal = map[string][]*object.Service{
 			Ports:       []api.ServicePort{{Name: "http", Protocol: "tcp", Port: 80}},
 		},
 	},
+	"svc-headless.testns": {
+		{
+			Name:       "svc-headless",
+			Namespace:  "testns",
+			Type:       api.ServiceTypeClusterIP,
+			ClusterIPs: []string{api.ClusterIPNone},
+			Ports:      []api.ServicePort{{Name: "http", Protocol: "tcp", Port: 80}},
+		},
+	},
 }
 
 func (external) ServiceList() []*object.Service {
-	var svcs []*object.Service
+	svcs := make([]*object.Service, 0, len(svcIndexExternal))
 	for _, svc := range svcIndexExternal {
 		svcs = append(svcs, svc...)
 	}

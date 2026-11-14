@@ -70,12 +70,18 @@ func TestPrint(t *testing.T) {
 
 	*/
 
-	f, err := os.Create("tmp")
+	f, err := os.CreateTemp(t.TempDir(), "print_test_tmp")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
-	//Redirect the printed results to a tmp file for later comparison
+	// Redirect Print output to a temp file, then restore stdout and close
+	// the handle so TempDir cleanup can remove it on Windows.
+	stdout := os.Stdout
 	os.Stdout = f
+	t.Cleanup(func() {
+		os.Stdout = stdout
+		f.Close()
+	})
 
 	tree.Print()
 	/**
@@ -84,19 +90,16 @@ func TestPrint(t *testing.T) {
 	  server3.example.com.
 	*/
 
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
 	buf := make([]byte, 256)
-	f.Seek(0, 0)
-	_, er := f.Read(buf)
-	if er != nil {
-		t.Error(err)
+	if _, err := f.Read(buf); err != nil {
+		t.Fatal(err)
 	}
 	height := strings.Count(string(buf), ". \n")
 	//Compare the height of the print with the actual height of the tree
 	if height != 3 {
-		f.Close()
-		os.Remove("tmp")
 		t.Fatal("The number of rows is inconsistent with the actual number of rows in the tree itself.")
 	}
-	f.Close()
-	os.Remove("tmp")
 }

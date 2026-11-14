@@ -9,6 +9,10 @@ import (
 	"github.com/coredns/coredns/plugin"
 )
 
+// maxRegexpLen is a hard limit on the length of a regex pattern to prevent
+// OOM during regex compilation with malicious input.
+const maxRegexpLen = 10000
+
 func init() { plugin.Register("errors", setup) }
 
 func setup(c *caddy.Controller) error {
@@ -52,55 +56,81 @@ func errorsParse(c *caddy.Controller) (*errorHandler, error) {
 		}
 
 		for c.NextBlock() {
-			if err := parseBlock(c, handler); err != nil {
-				return nil, err
+			switch c.Val() {
+			case "stacktrace":
+				dnsserver.GetConfig(c).Stacktrace = true
+			case "consolidate":
+				pattern, err := parseConsolidate(c)
+				if err != nil {
+					return nil, err
+				}
+				handler.patterns = append(handler.patterns, pattern)
+			default:
+				return handler, c.SyntaxErr("Unknown field " + c.Val())
 			}
 		}
 	}
 	return handler, nil
 }
 
-func parseBlock(c *caddy.Controller, h *errorHandler) error {
-	if c.Val() != "consolidate" {
-		return c.SyntaxErr("consolidate")
-	}
-
+func parseConsolidate(c *caddy.Controller) (*pattern, error) {
 	args := c.RemainingArgs()
-	if len(args) < 2 || len(args) > 3 {
-		return c.ArgErr()
+	if len(args) < 2 || len(args) > 4 {
+		return nil, c.ArgErr()
 	}
 	p, err := time.ParseDuration(args[0])
 	if err != nil {
-		return c.Err(err.Error())
+		return nil, c.Err(err.Error())
+	}
+	if len(args[1]) > maxRegexpLen {
+		return nil, c.Errf("regex pattern too long: %d > %d", len(args[1]), maxRegexpLen)
 	}
 	re, err := regexp.Compile(args[1])
 	if err != nil {
-		return c.Err(err.Error())
+		return nil, c.Err(err.Error())
 	}
-	lc, err := parseLogLevel(c, args)
-	if err != nil {
-		return err
-	}
-	h.patterns = append(h.patterns, &pattern{period: p, pattern: re, logCallback: lc})
 
-	return nil
+	lc, showFirst, err := parseOptionalParams(c, args[2:])
+	if err != nil {
+		return nil, err
+	}
+
+	return &pattern{period: p, pattern: re, logCallback: lc, showFirst: showFirst}, nil
 }
 
-func parseLogLevel(c *caddy.Controller, args []string) (func(format string, v ...interface{}), error) {
-	if len(args) != 3 {
-		return log.Errorf, nil
+// parseOptionalParams parses optional parameters (log level and show_first flag).
+// Order: log level (optional) must come before show_first (optional).
+func parseOptionalParams(c *caddy.Controller, args []string) (func(format string, v ...any), bool, error) {
+	logLevels := map[string]func(format string, v ...any){
+		"warning": log.Warningf,
+		"error":   log.Errorf,
+		"info":    log.Infof,
+		"debug":   log.Debugf,
 	}
 
-	switch args[2] {
-	case "warning":
-		return log.Warningf, nil
-	case "error":
-		return log.Errorf, nil
-	case "info":
-		return log.Infof, nil
-	case "debug":
-		return log.Debugf, nil
-	default:
-		return nil, c.Errf("unknown log level argument in consolidate: %s", args[2])
+	var logCallback func(format string, v ...any) // nil means not set yet
+	showFirst := false
+
+	for _, arg := range args {
+		if callback, isLogLevel := logLevels[arg]; isLogLevel {
+			if logCallback != nil {
+				return nil, false, c.Errf("multiple log levels specified in consolidate")
+			}
+			if showFirst {
+				return nil, false, c.Errf("log level must come before show_first in consolidate")
+			}
+			logCallback = callback
+		} else if arg == "show_first" {
+			showFirst = true
+		} else {
+			return nil, false, c.Errf("unknown option in consolidate: %s", arg)
+		}
 	}
+
+	// Use default log level if not specified
+	if logCallback == nil {
+		logCallback = log.Errorf
+	}
+
+	return logCallback, showFirst, nil
 }

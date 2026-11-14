@@ -15,20 +15,26 @@ func TestSetupHeader(t *testing.T) {
 	}{
 		{`header {}`, true, "Wrong argument count or unexpected line ending after"},
 		{`header {
-					set
-}`, true, "invalid length for flags, at least one should be provided"},
-		{`header {
 					foo
+}`, true, "invalid selector=foo should be query or response"},
+		{`header {
+					response set
 }`, true, "invalid length for flags, at least one should be provided"},
 		{`header {
-					foo bar
+					query foo
+}`, true, "invalid length for flags, at least one should be provided"},
+		{`header {
+					query foo rd
 }`, true, "unknown flag action=foo, should be set or clear"},
 		{`header {
-					set ra
-}`, false, ""},
+					query set rd
+		}`, false, ""},
 		{`header {
-			set ra aa
-			clear rd
+					response set aa
+		}`, false, ""},
+		{`header {
+			response set ra aa
+			query clear rd
 }`, false, ""},
 	}
 

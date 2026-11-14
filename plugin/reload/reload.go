@@ -3,7 +3,7 @@ package reload
 
 import (
 	"bytes"
-	"crypto/md5"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"sync"
@@ -22,10 +22,30 @@ const (
 )
 
 type reload struct {
-	dur  time.Duration
-	u    int
-	mtx  sync.RWMutex
-	quit chan bool
+	configHash   [sha512.Size]byte
+	dur          time.Duration
+	u            int
+	mtx          sync.RWMutex
+	quit         chan struct{}
+	shutdownOnce sync.Once
+}
+
+func newReload() *reload {
+	return &reload{dur: defaultInterval, quit: make(chan struct{})}
+}
+
+func (r *reload) shutdown() error {
+	r.shutdownOnce.Do(func() {
+		close(r.quit)
+	})
+	return nil
+}
+
+func reloadForInstance(instance *caddy.Instance) *reload {
+	instance.StorageMu.RLock()
+	defer instance.StorageMu.RUnlock()
+	state, _ := instance.Storage[reloadStorageKey{}].(*reload)
+	return state
 }
 
 func (r *reload) setUsage(u int) {
@@ -60,29 +80,25 @@ func parse(corefile caddy.Input) ([]byte, error) {
 	return json.Marshal(serverBlocks)
 }
 
-func hook(event caddy.EventName, info interface{}) error {
+func hook(event caddy.EventName, info any) error {
 	if event != caddy.InstanceStartupEvent {
-		return nil
-	}
-	// if reload is removed from the Corefile, then the hook
-	// is still registered but setup is never called again
-	// so we need a flag to tell us not to reload
-	if r.usage() == unused {
 		return nil
 	}
 
 	// this should be an instance. ok to panic if not
 	instance := info.(*caddy.Instance)
-	parsedCorefile, err := parse(instance.Caddyfile())
-	if err != nil {
-		return err
+	r := reloadForInstance(instance)
+	if r == nil || r.usage() == unused {
+		return nil
 	}
-
-	md5sum := md5.Sum(parsedCorefile)
-	log.Infof("Running configuration MD5 = %x\n", md5sum)
+	sha512sum := r.configHash
+	log.Infof("Running configuration SHA512 = %x\n", sha512sum)
+	quit := r.quit
+	interval := r.interval()
 
 	go func() {
-		tick := time.NewTicker(r.interval())
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
 
 		for {
 			select {
@@ -96,16 +112,20 @@ func hook(event caddy.EventName, info interface{}) error {
 					log.Warningf("Corefile parse failed: %s", err)
 					continue
 				}
-				s := md5.Sum(parsedCorefile)
-				if s != md5sum {
-					reloadInfo.Delete(prometheus.Labels{"hash": "md5", "value": hex.EncodeToString(md5sum[:])})
+				s := sha512.Sum512(parsedCorefile)
+				if s != sha512sum {
+					reloadInfo.Delete(prometheus.Labels{"hash": "sha512", "value": hex.EncodeToString(sha512sum[:])})
 					// Let not try to restart with the same file, even though it is wrong.
-					md5sum = s
+					sha512sum = s
 					// now lets consider that plugin will not be reload, unless appear in next config file
 					// change status of usage will be reset in setup if the plugin appears in config file
 					r.setUsage(maybeUsed)
+					// If shutdown is in progress, avoid attempting a restart.
+					if shutdownRequested(quit) {
+						return
+					}
 					_, err := instance.Restart(corefile)
-					reloadInfo.WithLabelValues("md5", hex.EncodeToString(md5sum[:])).Set(1)
+					reloadInfo.WithLabelValues("sha512", hex.EncodeToString(sha512sum[:])).Set(1)
 					if err != nil {
 						log.Errorf("Corefile changed but reload failed: %s", err)
 						failedCount.Add(1)
@@ -117,11 +137,22 @@ func hook(event caddy.EventName, info interface{}) error {
 					}
 					return
 				}
-			case <-r.quit:
+			case <-quit:
 				return
 			}
 		}
 	}()
 
 	return nil
+}
+
+// shutdownRequested reports whether a shutdown has been requested via quit channel.
+// helps with unit testing of the shutdown gate logic.
+func shutdownRequested(quit <-chan struct{}) bool {
+	select {
+	case <-quit:
+		return true
+	default:
+		return false
+	}
 }

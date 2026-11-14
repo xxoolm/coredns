@@ -3,6 +3,8 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -12,7 +14,22 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+)
+
+const (
+	// maxDNSMessageBytes is the maximum size of a DNS message on the wire.
+	maxDNSMessageBytes = dns.MaxMsgSize
+
+	// maxProtobufPayloadBytes accounts for protobuf overhead.
+	// Field tag=1 (1 byte) + length varint for 65535 (3 bytes) = 4 bytes total
+	maxProtobufPayloadBytes = maxDNSMessageBytes + 4
+)
+
+var (
+	// ErrDNSMessageTooLarge is returned when a DNS message exceeds the maximum allowed size.
+	ErrDNSMessageTooLarge = errors.New("dns message exceeds size limit")
 )
 
 // Proxy defines an upstream host.
@@ -20,6 +37,7 @@ type Proxy struct {
 	addr string
 
 	// connection
+	conn     *grpc.ClientConn
 	client   pb.DnsServiceClient
 	dialOpts []grpc.DialOption
 }
@@ -33,16 +51,33 @@ func newProxy(addr string, tlsConfig *tls.Config) (*Proxy, error) {
 	if tlsConfig != nil {
 		p.dialOpts = append(p.dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 	} else {
-		p.dialOpts = append(p.dialOpts, grpc.WithInsecure())
+		p.dialOpts = append(p.dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	conn, err := grpc.Dial(p.addr, p.dialOpts...)
+	// Cap send/recv sizes to avoid oversized messages.
+	// Note: gRPC size limits apply to the serialized protobuf message size.
+	p.dialOpts = append(p.dialOpts,
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxProtobufPayloadBytes),
+			grpc.MaxCallSendMsgSize(maxProtobufPayloadBytes),
+		),
+	)
+
+	conn, err := grpc.NewClient(p.addr, p.dialOpts...)
 	if err != nil {
 		return nil, err
 	}
+	p.conn = conn
 	p.client = pb.NewDnsServiceClient(conn)
 
 	return p, nil
+}
+
+func (p *Proxy) close() error {
+	if p.conn == nil {
+		return nil
+	}
+	return p.conn.Close()
 }
 
 // query sends the request and waits for a response.
@@ -51,6 +86,10 @@ func (p *Proxy) query(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 
 	msg, err := req.Pack()
 	if err != nil {
+		return nil, err
+	}
+
+	if err := validateDNSSize(msg); err != nil {
 		return nil, err
 	}
 
@@ -63,8 +102,14 @@ func (p *Proxy) query(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 		}
 		return nil, err
 	}
+	wire := reply.GetMsg()
+
+	if err := validateDNSSize(wire); err != nil {
+		return nil, err
+	}
+
 	ret := new(dns.Msg)
-	if err := ret.Unpack(reply.Msg); err != nil {
+	if err := ret.Unpack(wire); err != nil {
 		return nil, err
 	}
 
@@ -78,4 +123,12 @@ func (p *Proxy) query(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	RequestDuration.WithLabelValues(p.addr).Observe(time.Since(start).Seconds())
 
 	return ret, nil
+}
+
+func validateDNSSize(data []byte) error {
+	l := len(data)
+	if l > maxDNSMessageBytes {
+		return fmt.Errorf("%w: %d bytes (limit %d)", ErrDNSMessageTooLarge, l, maxDNSMessageBytes)
+	}
+	return nil
 }

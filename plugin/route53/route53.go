@@ -17,9 +17,9 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 	"github.com/coredns/coredns/request"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/route53"
-	"github.com/aws/aws-sdk-go/service/route53/route53iface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
+	"github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/miekg/dns"
 )
 
@@ -29,7 +29,7 @@ type Route53 struct {
 	Fall fall.F
 
 	zoneNames []string
-	client    route53iface.Route53API
+	client    route53Client
 	upstream  *upstream.Upstream
 	refresh   time.Duration
 
@@ -50,12 +50,12 @@ type zones map[string][]*zone
 // does exist, and returns a new *Route53. In addition to this, upstream is use
 // for doing recursive queries against CNAMEs. Returns error if it cannot
 // verify any given domain name/zone id pair.
-func New(ctx context.Context, c route53iface.Route53API, keys map[string][]string, refresh time.Duration) (*Route53, error) {
+func New(ctx context.Context, c route53Client, keys map[string][]string, refresh time.Duration) (*Route53, error) {
 	zones := make(map[string][]*zone, len(keys))
 	zoneNames := make([]string, 0, len(keys))
 	for dns, hostedZoneIDs := range keys {
 		for _, hostedZoneID := range hostedZoneIDs {
-			_, err := c.ListHostedZonesByNameWithContext(ctx, &route53.ListHostedZonesByNameInput{
+			_, err := c.ListHostedZonesByName(ctx, &route53.ListHostedZonesByNameInput{
 				DNSName:      aws.String(dns),
 				HostedZoneId: aws.String(hostedZoneID),
 			})
@@ -84,12 +84,15 @@ func (h *Route53) Run(ctx context.Context) error {
 		return err
 	}
 	go func() {
+		timer := time.NewTimer(h.refresh)
+		defer timer.Stop()
 		for {
+			timer.Reset(h.refresh)
 			select {
 			case <-ctx.Done():
 				log.Debugf("Breaking out of Route53 update loop for %v: %v", h.zoneNames, ctx.Err())
 				return
-			case <-time.After(h.refresh):
+			case <-timer.C:
 				if err := h.updateZones(ctx); err != nil && ctx.Err() == nil /* Don't log error if ctx expired. */ {
 					log.Errorf("Failed to update zones %v: %v", h.zoneNames, err)
 				}
@@ -118,9 +121,14 @@ func (h *Route53) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	m.Authoritative = true
 	var result file.Result
 	for _, hostedZone := range z {
+		// Only the zone pointer itself needs to be guarded against a
+		// concurrent swap in updateZones; Lookup can run unlocked since it
+		// may block for a while resolving external names via upstream, and
+		// a panic inside it must not leave zMu permanently locked.
 		h.zMu.RLock()
-		m.Answer, m.Ns, m.Extra, result = hostedZone.z.Lookup(ctx, state, qname)
+		hz := hostedZone.z
 		h.zMu.RUnlock()
+		m.Answer, m.Ns, m.Extra, result = hz.Lookup(ctx, state, qname)
 
 		// Take the answer if it's non-empty OR if there is another
 		// record type exists for this name (NODATA).
@@ -164,17 +172,18 @@ const escapeSeq = "\\"
 // for everything else.
 //
 // Example:
-//   `\\052.example.com.` -> `*.example.com`
-//   `\\137.example.com.` -> error ('_' is not valid)
+//
+//	`\\052.example.com.` -> `*.example.com`
+//	`\\137.example.com.` -> error ('_' is not valid)
 func maybeUnescape(s string) (string, error) {
-	var out string
+	var outSb strings.Builder
 	for {
 		i := strings.Index(s, escapeSeq)
 		if i < 0 {
-			return out + s, nil
+			return outSb.String() + s, nil
 		}
 
-		out += s[:i]
+		outSb.WriteString(s[:i])
 
 		li, ri := i+len(escapeSeq), i+len(escapeSeq)+3
 		if ri > len(s) {
@@ -192,7 +201,7 @@ func maybeUnescape(s string) (string, error) {
 		case r >= rune('a') && r <= rune('z'): // Route53 converts everything to lowercase.
 		case r >= rune('0') && r <= rune('9'):
 		case r == rune('*'):
-			if out != "" {
+			if outSb.Len() != 0 {
 				return "", errors.New("`*' only supported as wildcard (leftmost label)")
 			}
 		case r == rune('-'):
@@ -201,26 +210,25 @@ func maybeUnescape(s string) (string, error) {
 			return "", fmt.Errorf("invalid character: %s%#03o", escapeSeq, r)
 		}
 
-		out += string(r)
+		outSb.WriteString(string(r))
 
 		s = s[i+len(escapeSeq)+3:]
 	}
 }
 
-func updateZoneFromRRS(rrs *route53.ResourceRecordSet, z *file.Zone) error {
+func updateZoneFromRRS(rrs *types.ResourceRecordSet, z *file.Zone) error {
 	for _, rr := range rrs.ResourceRecords {
-
-		n, err := maybeUnescape(aws.StringValue(rrs.Name))
+		n, err := maybeUnescape(aws.ToString(rrs.Name))
 		if err != nil {
-			return fmt.Errorf("failed to unescape `%s' name: %v", aws.StringValue(rrs.Name), err)
+			return fmt.Errorf("failed to unescape `%s' name: %v", aws.ToString(rrs.Name), err)
 		}
-		v, err := maybeUnescape(aws.StringValue(rr.Value))
+		v, err := maybeUnescape(aws.ToString(rr.Value))
 		if err != nil {
-			return fmt.Errorf("failed to unescape `%s' value: %v", aws.StringValue(rr.Value), err)
+			return fmt.Errorf("failed to unescape `%s' value: %v", aws.ToString(rr.Value), err)
 		}
 
 		// Assemble RFC 1035 conforming record to pass into dns scanner.
-		rfc1035 := fmt.Sprintf("%s %d IN %s %s", n, aws.Int64Value(rrs.TTL), aws.StringValue(rrs.Type), v)
+		rfc1035 := fmt.Sprintf("%s %d IN %s %s", n, aws.ToInt64(rrs.TTL), rrs.Type, v)
 		r, err := dns.NewRR(rfc1035)
 		if err != nil {
 			return fmt.Errorf("failed to parse resource record: %v", err)
@@ -250,33 +258,39 @@ func (h *Route53) updateZones(ctx context.Context) error {
 				newZ.Upstream = h.upstream
 				in := &route53.ListResourceRecordSetsInput{
 					HostedZoneId: aws.String(hostedZone.id),
-					MaxItems:     aws.String("1000"),
+					MaxItems:     aws.Int32(1000),
 				}
-				err = h.client.ListResourceRecordSetsPagesWithContext(ctx, in,
-					func(out *route53.ListResourceRecordSetsOutput, last bool) bool {
-						for _, rrs := range out.ResourceRecordSets {
-							if err := updateZoneFromRRS(rrs, newZ); err != nil {
-								// Maybe unsupported record type. Log and carry on.
-								log.Warningf("Failed to process resource record set: %v", err)
-							}
+				complete := false
+				var out *route53.ListResourceRecordSetsOutput
+				for out, err = h.client.ListResourceRecordSets(ctx, in); !complete; out, err = h.client.ListResourceRecordSets(ctx, in) {
+					if err != nil {
+						err = fmt.Errorf("failed to list resource records for %v:%v from route53: %v", zName, hostedZone.id, err)
+						return
+					}
+					for _, rrs := range out.ResourceRecordSets {
+						if err := updateZoneFromRRS(&rrs, newZ); err != nil {
+							// Maybe unsupported record type. Log and carry on.
+							log.Warningf("Failed to process resource record set: %v", err)
 						}
-						return true
-					})
-				if err != nil {
-					err = fmt.Errorf("failed to list resource records for %v:%v from route53: %v", zName, hostedZone.id, err)
-					return
+					}
+					if out.IsTruncated {
+						in.StartRecordName = out.NextRecordName
+						in.StartRecordType = out.NextRecordType
+						in.StartRecordIdentifier = out.NextRecordIdentifier
+					} else {
+						complete = true
+					}
 				}
 				h.zMu.Lock()
 				(*z[i]).z = newZ
 				h.zMu.Unlock()
 			}
-
 		}(zName, z)
 	}
 	// Collect errors (if any). This will also sync on all zones updates
 	// completion.
 	var errs []string
-	for i := 0; i < len(h.zones); i++ {
+	for range len(h.zones) {
 		err := <-errc
 		if err != nil {
 			errs = append(errs, err.Error())

@@ -13,6 +13,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+// maxRegexpLen is a hard limit on the length of a regex pattern to prevent
+// OOM during regex compilation with malicious input.
+const maxRegexpLen = 10000
+
 // stringRewriter rewrites a string
 type stringRewriter interface {
 	rewriteString(src string) string
@@ -40,7 +44,7 @@ func (r *regexStringRewriter) rewriteString(src string) string {
 	s := r.replacement
 	for groupIndex, groupValue := range regexGroups {
 		groupIndexStr := "{" + strconv.Itoa(groupIndex) + "}"
-		s = strings.Replace(s, groupIndexStr, groupValue, -1)
+		s = strings.ReplaceAll(s, groupIndexStr, groupValue)
 	}
 	return s
 }
@@ -62,8 +66,14 @@ func (r *remapStringRewriter) rewriteString(src string) string {
 	if src == r.orig {
 		return r.replacement
 	}
-	if strings.HasSuffix(src, "."+r.orig) {
-		return src[0:len(src)-len(r.orig)] + r.replacement
+	// src is a sub domain of orig when orig sits at the end of src with a label
+	// boundary right before it. Checking that boundary by index matches exactly
+	// what strings.HasSuffix(src, "."+r.orig) matches, without building the
+	// dot-prefixed string. Caching that string on the rewriter is not an option:
+	// responseRuleFor constructs a rewriter per rewritten request, so the cost
+	// would land on every request to save work on every record.
+	if i := len(src) - len(r.orig); i > 0 && src[i-1] == '.' && src[i:] == r.orig {
+		return src[:i] + r.replacement
 	}
 	return src
 }
@@ -81,8 +91,8 @@ func newSuffixStringRewriter(orig, replacement string) stringRewriter {
 }
 
 func (r *suffixStringRewriter) rewriteString(src string) string {
-	if strings.HasSuffix(src, r.suffix) {
-		return strings.TrimSuffix(src, r.suffix) + r.replacement
+	if before, ok := strings.CutSuffix(src, r.suffix); ok {
+		return before + r.replacement
 	}
 	return src
 }
@@ -92,7 +102,7 @@ type nameRewriterResponseRule struct {
 	stringRewriter
 }
 
-func (r *nameRewriterResponseRule) RewriteResponse(rr dns.RR) {
+func (r *nameRewriterResponseRule) RewriteResponse(_res *dns.Msg, rr dns.RR) {
 	rr.Header().Name = r.rewriteString(rr.Header().Name)
 }
 
@@ -101,7 +111,7 @@ type valueRewriterResponseRule struct {
 	stringRewriter
 }
 
-func (r *valueRewriterResponseRule) RewriteResponse(rr dns.RR) {
+func (r *valueRewriterResponseRule) RewriteResponse(_res *dns.Msg, rr dns.RR) {
 	value := getRecordValueForRewrite(rr)
 	if value != "" {
 		new := r.rewriteString(value)
@@ -157,10 +167,11 @@ func (rule *nameRuleBase) responseRuleFor(state request.Request) (ResponseRules,
 	}
 
 	rewriter := newRemapStringRewriter(state.Req.Question[0].Name, state.Name())
-	rules := ResponseRules{
+	rules := make(ResponseRules, 0, 2+len(rule.static))
+	rules = append(rules,
 		&nameRewriterResponseRule{rewriter},
 		&valueRewriterResponseRule{rewriter},
-	}
+	)
 	return append(rules, rule.static...), RewriteDone
 }
 
@@ -181,7 +192,7 @@ func newExactNameRule(nextAction string, orig, replacement string, answers Respo
 	}
 }
 
-func (rule *exactNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
+func (rule *exactNameRule) Rewrite(_ctx context.Context, state request.Request) (ResponseRules, Result) {
 	if rule.from == state.Name() {
 		state.Req.Question[0].Name = rule.replacement
 		return rule.responseRuleFor(state)
@@ -202,9 +213,9 @@ func newPrefixNameRule(nextAction string, auto bool, prefix, replacement string,
 	}
 }
 
-func (rule *prefixNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
-	if strings.HasPrefix(state.Name(), rule.prefix) {
-		state.Req.Question[0].Name = rule.replacement + strings.TrimPrefix(state.Name(), rule.prefix)
+func (rule *prefixNameRule) Rewrite(_ctx context.Context, state request.Request) (ResponseRules, Result) {
+	if after, ok := strings.CutPrefix(state.Name(), rule.prefix); ok {
+		state.Req.Question[0].Name = rule.replacement + after
 		return rule.responseRuleFor(state)
 	}
 	return nil, RewriteIgnored
@@ -217,15 +228,16 @@ type suffixNameRule struct {
 }
 
 func newSuffixNameRule(nextAction string, auto bool, suffix, replacement string, answers ResponseRules) Rule {
-	var rules ResponseRules
+	rules := make(ResponseRules, 0, len(answers))
 	if auto {
 		// for a suffix rewriter better standard response rewrites can be done
 		// just by using the original suffix/replacement in the opposite order
 		rewriter := newSuffixStringRewriter(replacement, suffix)
-		rules = ResponseRules{
+		rules = make(ResponseRules, 0, 2+len(answers))
+		rules = append(rules,
 			&nameRewriterResponseRule{rewriter},
 			&valueRewriterResponseRule{rewriter},
-		}
+		)
 	}
 	return &suffixNameRule{
 		newNameRuleBase(nextAction, false, replacement, append(rules, answers...)),
@@ -233,9 +245,9 @@ func newSuffixNameRule(nextAction string, auto bool, suffix, replacement string,
 	}
 }
 
-func (rule *suffixNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
-	if strings.HasSuffix(state.Name(), rule.suffix) {
-		state.Req.Question[0].Name = strings.TrimSuffix(state.Name(), rule.suffix) + rule.replacement
+func (rule *suffixNameRule) Rewrite(_ctx context.Context, state request.Request) (ResponseRules, Result) {
+	if before, ok := strings.CutSuffix(state.Name(), rule.suffix); ok {
+		state.Req.Question[0].Name = before + rule.replacement
 		return rule.responseRuleFor(state)
 	}
 	return nil, RewriteIgnored
@@ -255,9 +267,9 @@ func newSubstringNameRule(nextAction string, auto bool, substring, replacement s
 	}
 }
 
-func (rule *substringNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
+func (rule *substringNameRule) Rewrite(_ctx context.Context, state request.Request) (ResponseRules, Result) {
 	if strings.Contains(state.Name(), rule.substring) {
-		state.Req.Question[0].Name = strings.Replace(state.Name(), rule.substring, rule.replacement, -1)
+		state.Req.Question[0].Name = strings.ReplaceAll(state.Name(), rule.substring, rule.replacement)
 		return rule.responseRuleFor(state)
 	}
 	return nil, RewriteIgnored
@@ -277,7 +289,7 @@ func newRegexNameRule(nextAction string, auto bool, pattern *regexp.Regexp, repl
 	}
 }
 
-func (rule *regexNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
+func (rule *regexNameRule) Rewrite(_ctx context.Context, state request.Request) (ResponseRules, Result) {
 	regexGroups := rule.pattern.FindStringSubmatch(state.Name())
 	if len(regexGroups) == 0 {
 		return nil, RewriteIgnored
@@ -285,7 +297,7 @@ func (rule *regexNameRule) Rewrite(ctx context.Context, state request.Request) (
 	s := rule.replacement
 	for groupIndex, groupValue := range regexGroups {
 		groupIndexStr := "{" + strconv.Itoa(groupIndex) + "}"
-		s = strings.Replace(s, groupIndexStr, groupValue, -1)
+		s = strings.ReplaceAll(s, groupIndexStr, groupValue)
 	}
 	state.Req.Question[0].Name = s
 	return rule.responseRuleFor(state)
@@ -298,18 +310,19 @@ func newNameRule(nextAction string, args ...string) (Rule, error) {
 		return nil, fmt.Errorf("too few arguments for a name rule")
 	}
 	if len(args) == 2 {
-		matchType = "exact"
+		matchType = ExactMatch
 		rewriteQuestionFrom = plugin.Name(args[0]).Normalize()
 		rewriteQuestionTo = plugin.Name(args[1]).Normalize()
 	}
 	if len(args) >= 3 {
 		matchType = strings.ToLower(args[0])
-		rewriteQuestionFrom = plugin.Name(args[1]).Normalize()
-		rewriteQuestionTo = plugin.Name(args[2]).Normalize()
-	}
-	if matchType == RegexMatch {
-		rewriteQuestionFrom = args[1]
-		rewriteQuestionTo = args[2]
+		if matchType == RegexMatch {
+			rewriteQuestionFrom = args[1]
+			rewriteQuestionTo = args[2]
+		} else {
+			rewriteQuestionFrom = plugin.Name(args[1]).Normalize()
+			rewriteQuestionTo = plugin.Name(args[2]).Normalize()
+		}
 	}
 	if matchType == ExactMatch || matchType == SuffixMatch {
 		if !hasClosingDot(rewriteQuestionFrom) {
@@ -323,8 +336,16 @@ func newNameRule(nextAction string, args ...string) (Rule, error) {
 	var err error
 	var answers ResponseRules
 	auto := false
-	if len(args) > 3 {
-		auto, answers, err = parseAnswerRules(matchType, args[3:])
+	answerStart := 3
+	withMetadata := len(args) > 3 && args[3] == "metadata"
+	if withMetadata {
+		if matchType != RegexMatch {
+			return nil, fmt.Errorf("metadata is only supported for regex name rules")
+		}
+		answerStart++
+	}
+	if len(args) > answerStart {
+		auto, answers, err = parseAnswerRules(matchType, args[answerStart:])
 		if err != nil {
 			return nil, err
 		}
@@ -343,6 +364,9 @@ func newNameRule(nextAction string, args ...string) (Rule, error) {
 	case SubstringMatch:
 		return newSubstringNameRule(nextAction, auto, rewriteQuestionFrom, rewriteQuestionTo, answers), nil
 	case RegexMatch:
+		if withMetadata {
+			return newMetadataNameRule(nextAction, auto, rewriteQuestionFrom, rewriteQuestionTo, answers)
+		}
 		rewriteQuestionFromPattern, err := isValidRegexPattern(rewriteQuestionFrom, rewriteQuestionTo)
 		if err != nil {
 			return nil, err
@@ -364,11 +388,7 @@ func parseAnswerRules(name string, args []string) (auto bool, rules ResponseRule
 	}
 	for arg < len(args) {
 		if last == "" && args[arg] != AnswerMatch {
-			if last == "" {
-				return false, nil, fmt.Errorf("exceeded the number of arguments for a non-answer rule argument for %s rule", name)
-
-			}
-			return false, nil, fmt.Errorf("exceeded the number of arguments for %s answer rule for %s rule", last, name)
+			return false, nil, fmt.Errorf("exceeded the number of arguments for a non-answer rule argument for %s rule", name)
 		}
 		if args[arg] == AnswerMatch {
 			arg++
@@ -417,7 +437,7 @@ func parseAnswerRules(name string, args []string) (auto bool, rules ResponseRule
 	if auto && nameRules > 0 {
 		return false, nil, fmt.Errorf("auto name answer rule cannot be combined with explicit name anwer rules")
 	}
-	return
+	return auto, rules, nil
 }
 
 // hasClosingDot returns true if s has a closing dot at the end.
@@ -428,7 +448,7 @@ func hasClosingDot(s string) bool {
 // getSubExprUsage returns the number of subexpressions used in s.
 func getSubExprUsage(s string) int {
 	subExprUsage := 0
-	for i := 0; i <= 100; i++ {
+	for i := range 101 {
 		if strings.Contains(s, "{"+strconv.Itoa(i)+"}") {
 			subExprUsage++
 		}
@@ -438,6 +458,9 @@ func getSubExprUsage(s string) int {
 
 // isValidRegexPattern returns a regular expression for pattern matching or errors, if any.
 func isValidRegexPattern(rewriteFrom, rewriteTo string) (*regexp.Regexp, error) {
+	if len(rewriteFrom) > maxRegexpLen {
+		return nil, fmt.Errorf("regex pattern too long: %d > %d", len(rewriteFrom), maxRegexpLen)
+	}
 	rewriteFromPattern, err := regexp.Compile(rewriteFrom)
 	if err != nil {
 		return nil, fmt.Errorf("invalid regex matching pattern: %s", rewriteFrom)

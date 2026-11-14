@@ -3,6 +3,7 @@ package route53
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,12 +14,11 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/fall"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/defaults"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/route53"
-	"github.com/aws/aws-sdk-go/service/route53/route53iface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
 )
 
 var log = clog.NewWithPlugin("route53")
@@ -26,8 +26,27 @@ var log = clog.NewWithPlugin("route53")
 func init() { plugin.Register("route53", setup) }
 
 // exposed for testing
-var f = func(credential *credentials.Credentials, endpoint *string) route53iface.Route53API {
-	return route53.New(session.Must(session.NewSession(&aws.Config{Credentials: credential, Endpoint: endpoint})))
+type route53Client interface {
+	ActivateKeySigningKey(ctx context.Context, params *route53.ActivateKeySigningKeyInput, optFns ...func(*route53.Options)) (*route53.ActivateKeySigningKeyOutput, error)
+	ListHostedZonesByName(ctx context.Context, params *route53.ListHostedZonesByNameInput, optFns ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error)
+	ListResourceRecordSets(ctx context.Context, params *route53.ListResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error)
+}
+
+var f = func(ctx context.Context, cfgOpts []func(*config.LoadOptions) error, clientOpts []func(*route53.Options)) (route53Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx, cfgOpts...)
+	if err != nil {
+		return nil, err
+	}
+	// If no region is specified, retrieve one from IMDS (SDK v1 used the AWS global partition as a fallback, v2 doesn't)
+	if cfg.Region == "" {
+		imdsClient := imds.NewFromConfig(cfg)
+		region, err := imdsClient.GetRegion(ctx, &imds.GetRegionInput{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get region from IMDS: %w", err)
+		}
+		cfg.Region = region.Region
+	}
+	return route53.NewFromConfig(cfg, clientOpts...), nil
 }
 
 func setup(c *caddy.Controller) error {
@@ -35,22 +54,22 @@ func setup(c *caddy.Controller) error {
 		keyPairs := map[string]struct{}{}
 		keys := map[string][]string{}
 
-		// Route53 plugin attempts to find AWS credentials by using ChainCredentials.
-		// And the order of that provider chain is as follows:
-		// Static AWS keys -> Environment Variables -> Credentials file -> IAM role
-		// With that said, even though a user doesn't define any credentials in
-		// Corefile, we should still attempt to read the default credentials file,
-		// ~/.aws/credentials with the default profile.
-		sharedProvider := &credentials.SharedCredentialsProvider{}
-		var providers []credentials.Provider
+		// Route53 plugin attempts to load AWS credentials following default SDK chaining.
+		// The order configuration is loaded in is:
+		// * Static AWS keys set in Corefile (deprecated)
+		// * Environment Variables
+		// * Shared Credentials file
+		// * Shared Configuration file (if AWS_SDK_LOAD_CONFIG is set to truthy value)
+		// * EC2 Instance Metadata (credentials only)
+		cfgOpts := []func(*config.LoadOptions) error{}
+		clientOpts := []func(*route53.Options){}
 		var fall fall.F
-		var endpoint string
 
 		refresh := time.Duration(1) * time.Minute // default update frequency to 1 minute
 
 		args := c.RemainingArgs()
 
-		for i := 0; i < len(args); i++ {
+		for i := range args {
 			parts := strings.SplitN(args[i], ":", 2)
 			if len(parts) != 2 {
 				return plugin.Error("route53", c.Errf("invalid zone %q", args[i]))
@@ -74,67 +93,68 @@ func setup(c *caddy.Controller) error {
 				if len(v) < 2 {
 					return plugin.Error("route53", c.Errf("invalid access key: '%v'", v))
 				}
-				providers = append(providers, &credentials.StaticProvider{
-					Value: credentials.Value{
-						AccessKeyID:     v[0],
-						SecretAccessKey: v[1],
-					},
-				})
+				cfgOpts = append(cfgOpts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(v[0], v[1], "")))
+				log.Warningf("Save aws_access_key in Corefile has been deprecated, please use other authentication methods instead")
 			case "aws_endpoint":
-				if c.NextArg() {
-					endpoint = c.Val()
-				} else {
+				if !c.NextArg() {
 					return plugin.Error("route53", c.ArgErr())
 				}
+				clientOpts = append(clientOpts, func(o *route53.Options) {
+					o.BaseEndpoint = aws.String(c.Val())
+				})
 			case "upstream":
 				c.RemainingArgs() // eats args
 			case "credentials":
-				if c.NextArg() {
-					sharedProvider.Profile = c.Val()
-				} else {
+				if !c.NextArg() {
 					return c.ArgErr()
 				}
+				cfgOpts = append(cfgOpts, config.WithSharedConfigProfile(c.Val()))
 				if c.NextArg() {
-					sharedProvider.Filename = c.Val()
+					sharedConfigFiles := []string{c.Val()}
+					// If AWS_SDK_LOAD_CONFIG is set also load ~/.aws/config to stay consistent
+					// with default SDK behavior.
+					if ok, _ := strconv.ParseBool(os.Getenv("AWS_SDK_LOAD_CONFIG")); ok {
+						sharedConfigFiles = append(sharedConfigFiles, config.DefaultSharedConfigFilename())
+					}
+					cfgOpts = append(cfgOpts, config.WithSharedConfigFiles(sharedConfigFiles))
 				}
 			case "fallthrough":
 				fall.SetZonesFromArgs(c.RemainingArgs())
 			case "refresh":
-				if c.NextArg() {
-					refreshStr := c.Val()
-					_, err := strconv.Atoi(refreshStr)
-					if err == nil {
-						refreshStr = fmt.Sprintf("%ss", c.Val())
-					}
-					refresh, err = time.ParseDuration(refreshStr)
-					if err != nil {
-						return plugin.Error("route53", c.Errf("Unable to parse duration: %v", err))
-					}
-					if refresh <= 0 {
-						return plugin.Error("route53", c.Errf("refresh interval must be greater than 0: %q", refreshStr))
-					}
-				} else {
+				if !c.NextArg() {
 					return plugin.Error("route53", c.ArgErr())
+				}
+				refreshStr := c.Val()
+				_, err := strconv.Atoi(refreshStr)
+				if err == nil {
+					refreshStr = c.Val() + "s"
+				}
+				refresh, err = time.ParseDuration(refreshStr)
+				if err != nil {
+					return plugin.Error("route53", c.Errf("Unable to parse duration: %v", err))
+				}
+				if refresh <= 0 {
+					return plugin.Error("route53", c.Errf("refresh interval must be greater than 0: %q", refreshStr))
 				}
 			default:
 				return plugin.Error("route53", c.Errf("unknown property %q", c.Val()))
 			}
 		}
 
-		session, err := session.NewSession(&aws.Config{})
-		if err != nil {
-			return plugin.Error("route53", err)
-		}
-
-		providers = append(providers, &credentials.EnvProvider{}, sharedProvider, defaults.RemoteCredProvider(*session.Config, session.Handlers))
-		client := f(credentials.NewChainCredentials(providers), &endpoint)
 		ctx, cancel := context.WithCancel(context.Background())
+		client, err := f(ctx, cfgOpts, clientOpts)
+		if err != nil {
+			cancel()
+			return plugin.Error("route53", c.Errf("failed to create route53 client: %v", err))
+		}
 		h, err := New(ctx, client, keys, refresh)
 		if err != nil {
+			cancel()
 			return plugin.Error("route53", c.Errf("failed to create route53 plugin: %v", err))
 		}
 		h.Fall = fall
 		if err := h.Run(ctx); err != nil {
+			cancel()
 			return plugin.Error("route53", c.Errf("failed to initialize route53 plugin: %v", err))
 		}
 		dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {

@@ -19,7 +19,7 @@ const name = "whoami"
 type Whoami struct{}
 
 // ServeDNS implements the plugin.Handler interface.
-func (wh Whoami) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (wh Whoami) ServeDNS(_ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 
 	a := new(dns.Msg)
@@ -45,7 +45,7 @@ func (wh Whoami) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	if state.QName() == "." {
 		srv.Hdr.Name = "_" + state.Proto() + state.QName()
 	}
-	port, _ := strconv.Atoi(state.Port())
+	port, _ := strconv.ParseUint(state.Port(), 10, 16)
 	srv.Port = uint16(port)
 	srv.Target = "."
 

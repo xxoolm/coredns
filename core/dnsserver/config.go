@@ -1,12 +1,19 @@
 package dnsserver
 
 import (
+	"context"
+	"crypto/sha512"
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/request"
+
+	"github.com/miekg/dns"
+	"github.com/pires/go-proxyproto"
 )
 
 // Config configuration for a single server.
@@ -21,12 +28,19 @@ type Config struct {
 	// The port to listen on.
 	Port string
 
+	// The number of servers that will listen on one port.
+	// By default, one server will be running.
+	NumSockets int
+
 	// Root points to a base directory we find user defined "things".
 	// First consumer is the file plugin to looks for zone files in this place.
 	Root string
 
 	// Debug controls the panic/recover mechanism that is enabled by default.
 	Debug bool
+
+	// Stacktrace controls including stacktrace as part of log from recover mechanism, it is disabled by default.
+	Stacktrace bool
 
 	// The transport we implement, normally just "dns" over TCP/UDP, but could be
 	// DNS-over-TLS or DNS-over-gRPC.
@@ -37,8 +51,108 @@ type Config struct {
 	// may depend on it.
 	HTTPRequestValidateFunc func(*http.Request) bool
 
+	// If this function is not nil it is called once per Server in ServePacket
+	// (so each UDP listening socket gets its own decorator under multisocket)
+	// and its result is installed as the underlying dns.Server's
+	// DecorateWriter. Plain dns:// UDP listeners only. When several server
+	// blocks sharing a listener set it, the last one in config order wins.
+	// Although this isn't referenced in-tree, external plugins may depend
+	// on it.
+	UDPDecorateWriterFunc func(*Server) dns.DecorateWriter
+
+	// FilterFuncs is used to further filter access
+	// to this handler. E.g. to limit access to a reverse zone
+	// on a non-octet boundary, i.e. /17
+	FilterFuncs []FilterFunc
+
+	// ViewName is the name of the Viewer PLugin defined in the Config
+	ViewName string
+
 	// TLSConfig when listening for encrypted connections (gRPC, DNS-over-TLS).
 	TLSConfig *tls.Config
+
+	// tlsConfigIdentity identifies dynamic TLS configurations that are known to
+	// represent the same listener-wide policy even after tls.Config.Clone.
+	tlsConfigIdentity *TLSConfigIdentity
+
+	// MaxQUICStreams defines the maximum number of concurrent QUIC streams for a QUIC server.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxQUICStreams *int
+
+	// MaxQUICConnections is the maximum number of concurrent connections.
+	MaxQUICConnections *int
+
+	// MaxQUICWorkerPoolSize defines the size of the worker pool for processing QUIC streams.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxQUICWorkerPoolSize *int
+
+	// ProxyProtoConnPolicy is the function that will be used to
+	// configure the PROXY protocol settings on listeners.
+	// If nil, PROXY protocol is disabled.
+	ProxyProtoConnPolicy proxyproto.ConnPolicyFunc
+
+	// ProxyProtoUDPSessionTrackingTTL enables per-UDP-session source address
+	// caching on the PacketConn listener when set to a positive duration.
+	// The first datagram of a Cloudflare Spectrum PPv2 session (which contains
+	// only the PROXY Protocol header and no DNS payload) is used to populate a
+	// short-lived cache keyed by the Spectrum-side remote address. Subsequent
+	// datagrams from the same remote address that carry no PROXY Protocol header
+	// are associated with the cached real client address for up to this duration
+	// (refreshed on each matching packet). A zero or negative value disables
+	// session tracking. Has no effect unless ProxyProtoConnPolicy is also set.
+	ProxyProtoUDPSessionTrackingTTL time.Duration
+
+	// ProxyProtoUDPSessionTrackingMaxSessions is the maximum number of concurrent
+	// UDP sessions held in the LRU cache. Zero means use the default (udpSessionMaxEntries).
+	// Has no effect unless ProxyProtoUDPSessionTrackingTTL is positive.
+	ProxyProtoUDPSessionTrackingMaxSessions int
+
+	// ProxyProtoTLVMetadata, when true, captures the PPv2 TLV vector and exposes
+	// it to downstream plugins as the "proxyproto/tlv" metadata label (raw hex).
+	// Opt-in: off by default so existing listeners skip the extra TLV processing.
+	// Has no effect unless ProxyProtoConnPolicy is also set.
+	ProxyProtoTLVMetadata bool
+
+	// MaxGRPCStreams defines the maximum number of concurrent streams per gRPC connection.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxGRPCStreams *int
+
+	// MaxGRPCConnections defines the maximum number of concurrent gRPC connections.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxGRPCConnections *int
+
+	// MaxHTTPSConnections defines the maximum number of concurrent HTTPS connections.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxHTTPSConnections *int
+
+	// MaxHTTPSStreams defines the maximum number of concurrent HTTP/2 streams per HTTPS connection.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxHTTPSStreams *int
+
+	// MaxHTTPS3Streams defines the maximum number of concurrent QUIC streams for HTTPS3.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxHTTPS3Streams *int
+
+	// MaxHTTPS3Connections defines the maximum number of concurrent HTTPS3 connections.
+	// This is nil if not specified, allowing for a default to be used.
+	MaxHTTPS3Connections *int
+
+	// Timeouts for connection-oriented servers. Exact applicability depends on transport.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+
+	// MaxTCPQueries defines the maximum number of queries served on a single TCP/TLS
+	// connection before it is closed. -1 means unlimited. This is nil if not specified,
+	// allowing for a default to be used.
+	MaxTCPQueries *int
+
+	// TSIG secrets, [name]key.
+	TsigSecret map[string]string
+
+	// allowedOpcodes contains non-default DNS opcodes that plugins have explicitly
+	// requested for this server block. QUERY and NOTIFY are accepted by default.
+	allowedOpcodes map[int]struct{}
 
 	// Plugin stack.
 	Plugin []plugin.Plugin
@@ -54,6 +168,28 @@ type Config struct {
 	// firstConfigInBlock is used to reference the first config in a server block, for the
 	// purpose of sharing single instance of each plugin among all zones in a server block.
 	firstConfigInBlock *Config
+
+	// metaCollector references the first MetadataCollector plugin, if one exists
+	metaCollector MetadataCollector
+}
+
+// FilterFunc is a function that filters requests from the Config
+type FilterFunc func(context.Context, *request.Request) bool
+
+// TLSConfigIdentity is an opaque identity for equivalent dynamic TLS policies.
+// Plugins should share one identity only when they can prove that independently
+// constructed TLS configs are interchangeable on the same listener.
+type TLSConfigIdentity struct {
+	_ byte
+}
+
+// NewTLSConfigIdentity returns a new opaque TLS policy identity.
+func NewTLSConfigIdentity() *TLSConfigIdentity { return &TLSConfigIdentity{} }
+
+// SetTLSConfigIdentity associates an opaque listener-wide policy identity with
+// this config.
+func (c *Config) SetTLSConfigIdentity(identity *TLSConfigIdentity) {
+	c.tlsConfigIdentity = identity
 }
 
 // keyForConfig builds a key for identifying the configs during setup time
@@ -74,4 +210,30 @@ func GetConfig(c *caddy.Controller) *Config {
 	// the configs.
 	ctx.saveConfig(key, &Config{ListenHosts: []string{""}})
 	return GetConfig(c)
+}
+
+// GetConfigHash returns the SHA512 hash of the parsed configuration for c's
+// instance, including all server blocks and expanded imports. It is captured
+// before server block normalization and plugin setup, without re-reading files.
+func GetConfigHash(c *caddy.Controller) [sha512.Size]byte {
+	return c.Context().(*dnsContext).configHash
+}
+
+// AddPluginToAllServerBlocks adds m once to every server block in c's
+// instance. It is intended for directives that must handle traffic on a
+// listener other than the one where the directive is configured.
+func AddPluginToAllServerBlocks(c *caddy.Controller, m plugin.Plugin) {
+	ctx := c.Context().(*dnsContext)
+	seen := make(map[*Config]struct{})
+	for _, cfg := range ctx.configs {
+		first := cfg.firstConfigInBlock
+		if first == nil {
+			first = cfg
+		}
+		if _, ok := seen[first]; ok {
+			continue
+		}
+		seen[first] = struct{}{}
+		first.AddPlugin(m)
+	}
 }

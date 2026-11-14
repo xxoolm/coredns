@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/coredns/caddy"
@@ -17,11 +16,10 @@ import (
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 
+	"github.com/go-logr/logr"
 	"github.com/miekg/dns"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"       // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
-	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"      // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
-	_ "k8s.io/client-go/plugin/pkg/client/auth/openstack" // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc" // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 )
@@ -34,7 +32,7 @@ func init() { plugin.Register(pluginName, setup) }
 
 func setup(c *caddy.Controller) error {
 	// Do not call klog.InitFlags(nil) here.  It will cause reload to panic.
-	klog.SetOutput(os.Stdout)
+	klog.SetLogger(logr.New(&loggerAdapter{P: log}))
 
 	k, err := kubernetesParse(c)
 	if err != nil {
@@ -60,25 +58,6 @@ func setup(c *caddy.Controller) error {
 	// get locally bound addresses
 	c.OnStartup(func() error {
 		k.localIPs = boundIPs(c)
-		return nil
-	})
-
-	wildWarner := time.NewTicker(10 * time.Second)
-	c.OnStartup(func() error {
-		go func() {
-			for {
-				select {
-				case <-wildWarner.C:
-					if wc := atomic.SwapUint64(&wildCount, 0); wc > 0 {
-						log.Warningf("%d deprecated wildcard queries received. Wildcard queries will no longer be supported in the next minor release.", wc)
-					}
-				}
-			}
-		}()
-		return nil
-	})
-	c.OnShutdown(func() error {
-		wildWarner.Stop()
 		return nil
 	})
 
@@ -108,7 +87,6 @@ func kubernetesParse(c *caddy.Controller) (*Kubernetes, error) {
 
 // ParseStanza parses a kubernetes stanza
 func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
-
 	k8s := New([]string{""})
 	k8s.autoPathSearch = searchFromResolvConf()
 
@@ -135,6 +113,7 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 
 	k8s.Upstream = upstream.New()
 
+	k8s.startupTimeout = time.Second * 5
 	for c.NextBlock() {
 		switch c.Val() {
 		case "endpoint_pod_names":
@@ -228,6 +207,11 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 				return nil, c.ArgErr()
 			}
 			k8s.opts.initEndpointsCache = false
+		case "zonal":
+			if len(c.RemainingArgs()) != 0 {
+				return nil, c.ArgErr()
+			}
+			k8s.opts.zonal = true
 		case "ignore":
 			args := c.RemainingArgs()
 			if len(args) > 0 {
@@ -235,9 +219,8 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 				if ignore == "empty_service" {
 					k8s.opts.ignoreEmptyService = true
 					continue
-				} else {
-					return nil, fmt.Errorf("unable to parse ignore value: '%v'", ignore)
 				}
+				return nil, fmt.Errorf("unable to parse ignore value: '%v'", ignore)
 			}
 		case "kubeconfig":
 			args := c.RemainingArgs()
@@ -253,6 +236,57 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 				overrides,
 			)
 			k8s.ClientConfig = config
+		case "multicluster":
+			k8s.opts.multiclusterZones = plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), []string{})
+		case "startup_timeout":
+			args := c.RemainingArgs()
+			if len(args) == 0 {
+				return nil, c.ArgErr()
+			}
+			var err error
+			k8s.startupTimeout, err = time.ParseDuration(args[0])
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse startup_timeout: %v, %s", args[0], err)
+			}
+		case "apiserver_qps":
+			args := c.RemainingArgs()
+			if len(args) != 1 {
+				return nil, c.ArgErr()
+			}
+			qps, err := strconv.ParseFloat(args[0], 32)
+			if err != nil {
+				return nil, c.Errf("invalid apiserver_qps %q: %v", args[0], err)
+			}
+			if qps < 0 {
+				return nil, c.Errf("apiserver_qps must be >= 0")
+			}
+			k8s.apiQPS = float32(qps)
+		case "apiserver_burst":
+			args := c.RemainingArgs()
+			if len(args) != 1 {
+				return nil, c.ArgErr()
+			}
+			burst, err := strconv.Atoi(args[0])
+			if err != nil {
+				return nil, c.Errf("invalid apiserver_burst %q: %v", args[0], err)
+			}
+			if burst < 0 {
+				return nil, c.Errf("apiserver_burst must be >= 0")
+			}
+			k8s.apiBurst = burst
+		case "apiserver_max_inflight":
+			args := c.RemainingArgs()
+			if len(args) != 1 {
+				return nil, c.ArgErr()
+			}
+			max, err := strconv.Atoi(args[0])
+			if err != nil {
+				return nil, c.Errf("invalid apiserver_max_inflight %q: %v", args[0], err)
+			}
+			if max < 0 {
+				return nil, c.Errf("apiserver_max_inflight must be >= 0")
+			}
+			k8s.apiMaxInflight = max
 		default:
 			return nil, c.Errf("unknown property '%s'", c.Val())
 		}
@@ -260,6 +294,19 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 
 	if len(k8s.Namespaces) != 0 && k8s.opts.namespaceLabelSelector != nil {
 		return nil, c.Errf("namespaces and namespace_labels cannot both be set")
+	}
+
+	for _, multiclusterZone := range k8s.opts.multiclusterZones {
+		if !slices.Contains(k8s.Zones, multiclusterZone) {
+			return nil, c.Errf("is not authoritative for the multicluster zone %s (authoritative zones: %v)", multiclusterZone, k8s.Zones)
+		}
+	}
+
+	if k8s.opts.zonal && !k8s.opts.initEndpointsCache {
+		// Zone-scoped names are answered from the endpoint cache;
+		// without it every zonal name would contradict the documented
+		// noendpoints behavior (NXDOMAIN for all headless queries).
+		return nil, c.Errf("zonal requires the endpoint cache; remove noendpoints")
 	}
 
 	return k8s, nil

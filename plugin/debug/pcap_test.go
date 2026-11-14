@@ -21,7 +21,6 @@ func msg() *dns.Msg {
 }
 
 func TestNoDebug(t *testing.T) {
-	// Must come first, because set log.D.Set() which is impossible to undo.
 	var f bytes.Buffer
 	golog.SetOutput(&f)
 
@@ -32,7 +31,7 @@ func TestNoDebug(t *testing.T) {
 	}
 }
 
-func ExampleLogHexdump() {
+func ExampleHexdump() {
 	buf, _ := msg().Pack()
 	h := hexdump(buf)
 	fmt.Println(string(h))
@@ -45,6 +44,7 @@ func ExampleLogHexdump() {
 }
 
 func TestHexdump(t *testing.T) {
+	t.Cleanup(log.D.Clear)
 	var f bytes.Buffer
 	golog.SetOutput(&f)
 	log.D.Set()
@@ -59,6 +59,7 @@ func TestHexdump(t *testing.T) {
 }
 
 func TestHexdumpf(t *testing.T) {
+	t.Cleanup(log.D.Clear)
 	var f bytes.Buffer
 	golog.SetOutput(&f)
 	log.D.Set()

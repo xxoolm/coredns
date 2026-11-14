@@ -3,6 +3,7 @@ package dnssec
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/cache"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+
+	"github.com/miekg/dns"
 )
 
 var log = clog.NewWithPlugin("dnssec")
@@ -23,7 +26,7 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("dnssec", err)
 	}
 
-	ca := cache.New(capacity)
+	ca := cache.New[[]dns.RR](capacity)
 	stop := make(chan struct{})
 
 	c.OnShutdown(func() error {
@@ -58,7 +61,6 @@ func dnssecParse(c *caddy.Controller) ([]string, []*DNSKEY, int, bool, error) {
 		zones = plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)
 
 		for c.NextBlock() {
-
 			switch x := c.Val(); x {
 			case "key":
 				k, e := keyParse(c)
@@ -79,7 +81,6 @@ func dnssecParse(c *caddy.Controller) ([]string, []*DNSKEY, int, bool, error) {
 			default:
 				return nil, nil, 0, false, c.Errf("unknown property '%s'", x)
 			}
-
 		}
 	}
 	// Check if we have both KSKs and ZSKs.
@@ -96,13 +97,7 @@ func dnssecParse(c *caddy.Controller) ([]string, []*DNSKEY, int, bool, error) {
 	// Check if each keys owner name can actually sign the zones we want them to sign.
 	for _, k := range keys {
 		kname := plugin.Name(k.K.Header().Name)
-		ok := false
-		for i := range zones {
-			if kname.Matches(zones[i]) {
-				ok = true
-				break
-			}
-		}
+		ok := slices.ContainsFunc(zones, kname.Matches)
 		if !ok {
 			return zones, keys, capacity, splitkeys, fmt.Errorf("key %s (keyid: %d) can not sign any of the zones", string(kname), k.tag)
 		}
@@ -119,7 +114,8 @@ func keyParse(c *caddy.Controller) ([]*DNSKEY, error) {
 		return nil, c.ArgErr()
 	}
 	value := c.Val()
-	if value == "file" {
+	switch value {
+	case "file":
 		ks := c.RemainingArgs()
 		if len(ks) == 0 {
 			return nil, c.ArgErr()
@@ -138,6 +134,19 @@ func keyParse(c *caddy.Controller) ([]*DNSKEY, error) {
 				base = filepath.Join(config.Root, base)
 			}
 			k, err := ParseKeyFile(base+".key", base+".private")
+			if err != nil {
+				return nil, err
+			}
+			keys = append(keys, k)
+		}
+	case "aws_secretsmanager":
+		ks := c.RemainingArgs()
+		if len(ks) == 0 {
+			return nil, c.ArgErr()
+		}
+
+		for _, k := range ks {
+			k, err := ParseKeyFromAWSSecretsManager(k)
 			if err != nil {
 				return nil, err
 			}

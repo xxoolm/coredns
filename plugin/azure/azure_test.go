@@ -3,11 +3,16 @@ package azure
 import (
 	"context"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/coredns/coredns/core/dnsserver"
+	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/file"
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/plugin/pkg/fall"
+	"github.com/coredns/coredns/plugin/pkg/upstream"
 	"github.com/coredns/coredns/plugin/test"
 	"github.com/coredns/coredns/request"
 
@@ -48,7 +53,7 @@ func testZones() zones {
 }
 
 func testHandler() test.HandlerFunc {
-	return func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	return func(_ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 		state := request.Request{W: w, Req: r}
 		qname := state.Name()
 		m := new(dns.Msg)
@@ -77,18 +82,18 @@ func TestAzure(t *testing.T) {
 		expectedErr  error
 	}{
 		{
-			qname: "example.org.",
-			qtype: dns.TypeA,
+			qname:      "example.org.",
+			qtype:      dns.TypeA,
 			wantAnswer: []string{"example.org.	300	IN	A	1.2.3.4"},
 		},
 		{
-			qname: "example.org",
-			qtype: dns.TypeAAAA,
+			qname:      "example.org",
+			qtype:      dns.TypeAAAA,
 			wantAnswer: []string{"example.org.	300	IN	AAAA	2001:db8:85a3::8a2e:370:7334"},
 		},
 		{
-			qname: "example.org",
-			qtype: dns.TypeSOA,
+			qname:      "example.org",
+			qtype:      dns.TypeSOA,
 			wantAnswer: []string{"org.	300	IN	SOA	ns1-06.azure-dns.com. azuredns-hostmaster.microsoft.com. 1 3600 300 2419200 300"},
 		},
 		{
@@ -98,38 +103,38 @@ func TestAzure(t *testing.T) {
 			wantMsgRCode: dns.RcodeServerFailure,
 		},
 		{
-			qname: "example.gov",
-			qtype: dns.TypeA,
+			qname:      "example.gov",
+			qtype:      dns.TypeA,
 			wantAnswer: []string{"example.gov.	300	IN	A	2.4.6.8"},
 		},
 		{
-			qname: "example.org",
-			qtype: dns.TypeSRV,
+			qname:      "example.org",
+			qtype:      dns.TypeSRV,
 			wantAnswer: []string{"example.org.	300	IN	SRV	1 10 5269 srv-1.example.com.", "example.org.	300	IN	SRV	1 10 5269 srv-2.example.com."},
 		},
 		{
-			qname: "cname.example.org.",
-			qtype: dns.TypeCNAME,
+			qname:      "cname.example.org.",
+			qtype:      dns.TypeCNAME,
 			wantAnswer: []string{"cname.example.org.	300	IN	CNAME	example.org."},
 		},
 		{
-			qname: "cname.example.org.",
-			qtype: dns.TypeA,
+			qname:      "cname.example.org.",
+			qtype:      dns.TypeA,
 			wantAnswer: []string{"cname.example.org.	300	IN	CNAME	example.org.", "example.org.	300	IN	A	1.2.3.4"},
 		},
 		{
-			qname: "mail.example.org.",
-			qtype: dns.TypeMX,
+			qname:      "mail.example.org.",
+			qtype:      dns.TypeMX,
 			wantAnswer: []string{"mail.example.org.	300	IN	MX	10 mailserver.example.com."},
 		},
 		{
-			qname: "ptr.example.org.",
-			qtype: dns.TypePTR,
+			qname:      "ptr.example.org.",
+			qtype:      dns.TypePTR,
 			wantAnswer: []string{"ptr.example.org.	300	IN	PTR	www.ptr-example.com."},
 		},
 		{
-			qname: "txt.example.org.",
-			qtype: dns.TypeTXT,
+			qname:      "txt.example.org.",
+			qtype:      dns.TypeTXT,
 			wantAnswer: []string{"txt.example.org.	300	IN	TXT	\"TXT for example.org\""},
 		},
 	}
@@ -145,7 +150,7 @@ func TestAzure(t *testing.T) {
 			t.Fatalf("Test %d: Expected error %v, but got %v", ti, tc.expectedErr, err)
 		}
 
-		if code != int(tc.wantRetCode) {
+		if code != tc.wantRetCode {
 			t.Fatalf("Test %d: Expected returned status code %s, but got %s", ti, dns.RcodeToString[tc.wantRetCode], dns.RcodeToString[code])
 		}
 
@@ -169,12 +174,115 @@ func TestAzure(t *testing.T) {
 			for i, ns := range rec.Msg.Ns {
 				got, ok := ns.(*dns.SOA)
 				if !ok {
-					t.Errorf("Test %d: Unexpected NS type. Want: SOA, got: %v", ti, reflect.TypeOf(got))
+					t.Errorf("Test %d: Unexpected NS type. Want: SOA, got: %v", ti, reflect.TypeFor[*dns.SOA]())
 				}
 				if got.String() != tc.wantNS[i] {
 					t.Errorf("Test %d: Unexpected NS.\nWant: %v\nGot: %v", ti, tc.wantNS[i], got)
 				}
 			}
 		}
+	}
+}
+
+// TestServeDNSDoesNotHoldLockDuringUpstreamLookup guards against holding
+// zMu.RLock() for the duration of a CNAME chase to an external name, which
+// can block on a slow upstream response. Holding the lock that long starves
+// the periodic zone update in updateZones (which needs zMu.Lock()), and
+// every query behind it queues up, so a single slow upstream response can
+// stall the whole plugin.
+func TestServeDNSDoesNotHoldLockDuringUpstreamLookup(t *testing.T) {
+	const timeout = 5 * time.Second
+
+	// entered signals that the upstream handler has been reached; release
+	// gates the handler's response so the test controls exactly when the
+	// in-flight query completes. releaseOnce lets every exit path (pass or
+	// fail) unblock the handler so no goroutine is left hanging.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHandler()
+
+	cfg := &dnsserver.Config{
+		Zone: ".",
+		Plugin: []plugin.Plugin{
+			func(plugin.Handler) plugin.Handler {
+				return plugin.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+					close(entered)
+					<-release
+					m := new(dns.Msg)
+					m.SetReply(r)
+					m.Answer = []dns.RR{test.A("external.target. 300 IN A 5.6.7.8")}
+					w.WriteMsg(m)
+					return dns.RcodeSuccess, nil
+				})
+			},
+		},
+	}
+	srv, err := dnsserver.NewServer("", []*dnsserver.Config{cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), dnsserver.Key{}, srv)
+
+	newZ := file.NewZone("example.org.", "")
+	newZ.Upstream = upstream.New()
+	for _, rr := range []string{
+		"example.org.	300	IN	SOA	ns1-06.azure-dns.com. azuredns-hostmaster.microsoft.com. 1 3600 300 2419200 300",
+		"cname-ext.example.org. 300 IN CNAME external.target.",
+	} {
+		r, _ := dns.NewRR(rr)
+		newZ.Insert(r)
+	}
+	zs := make(map[string][]*zone)
+	zs["example.org."] = append(zs["example.org."], &zone{zone: "example.org.", z: newZ})
+
+	az := Azure{
+		Next:      testHandler(),
+		Fall:      fall.Zero,
+		zoneNames: []string{"example.org."},
+		zones:     zs,
+	}
+
+	req := new(dns.Msg)
+	req.SetQuestion("cname-ext.example.org.", dns.TypeA)
+
+	done := make(chan struct{})
+	go func() {
+		rec := dnstest.NewRecorder(&test.ResponseWriter{})
+		az.ServeDNS(ctx, rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-entered:
+		// The query has reached the upstream handler and is now blocked on
+		// release, so a subsequent zMu.Lock() genuinely races the lookup.
+	case <-time.After(timeout):
+		t.Fatal("query never reached the upstream handler")
+	}
+
+	lockAcquired := make(chan struct{})
+	go func() {
+		// Stands in for the zone swap updateZones does every minute.
+		az.zMu.Lock()
+		zs["example.org."][0].z = file.NewZone("example.org.", "")
+		az.zMu.Unlock()
+		close(lockAcquired)
+	}()
+
+	select {
+	case <-lockAcquired:
+		// zMu.Lock() wasn't blocked by the in-flight upstream lookup.
+	case <-time.After(timeout):
+		t.Fatal("zMu.Lock() blocked while a query awaited a slow upstream lookup")
+	}
+
+	releaseHandler()
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("ServeDNS did not complete after the upstream handler was released")
 	}
 }
